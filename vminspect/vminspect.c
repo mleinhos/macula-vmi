@@ -1,0 +1,91 @@
+#include <getopt.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+#include "profile.h"
+#include "vminspect.h"
+#include "vmi.h"
+
+static struct vminspect vminspect = { 0 };
+
+void free_resources(void)
+{
+    cleanup_vmi(&vminspect);
+    cleanup_xen_access(&vminspect.xc);
+    cleanup_profile(&vminspect);
+}
+
+void usage(char *pname)
+{
+    printf("Usage: %s [OPTION]\n", pname);
+}
+
+int main(int argc, char *argv[])
+{
+    int c, ret;
+    
+    while ( 1 )
+    {
+        int option_index = 0;
+        static struct option options[] =
+        {
+            {"domain",  required_argument, 0, 'd'},
+            {"profile", required_argument, 0, 'p'},
+            {0, 0, 0, 0}
+        };
+
+        c = getopt_long(argc, argv, "d:p:", options, &option_index);
+        if ( c == -1 )
+            break;
+
+        switch (c)
+        {
+        case 'd':
+            vminspect.domain = optarg;
+            break;
+        case 'p':
+            vminspect.profile = optarg;
+            break;
+        default:
+            usage(argv[0]);
+            free_resources();
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    if ( !vminspect.domain )
+    {
+        printf("Missing domain name\n");
+        goto error;
+    }
+
+    if ( !vminspect.profile )
+    {
+        printf("Missing domain name\n");
+        goto error;
+    }
+
+    /* Parse and prepare the Rekall profile */
+    ret = init_profile(&vminspect);
+    if ( ret )
+        goto error;
+
+    /* Prepare the interface to Xen */
+    ret = init_xen_access(&vminspect.xc, vminspect.domain);
+    if ( ret )
+        goto error;
+
+    /* Initialize LibVMI and Xen altp2m */
+    ret = init_vmi(&vminspect);
+    if ( ret )
+        goto error;
+
+    free_resources();
+
+    return EXIT_SUCCESS;
+
+error:
+    free_resources();
+    exit(EXIT_FAILURE);
+}
