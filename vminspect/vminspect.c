@@ -1,4 +1,5 @@
 #include <getopt.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -8,6 +9,12 @@
 #include "vmi.h"
 
 static struct vminspect vminspect = { 0 };
+static int interrupted = 0;
+
+static void exit_handler(int sig)
+{
+    interrupted = sig;
+}
 
 void free_resources(void)
 {
@@ -24,7 +31,19 @@ void usage(char *pname)
 int main(int argc, char *argv[])
 {
     int c, ret;
-    
+    status_t status;
+    struct sigaction act;
+
+    /* Setup exit handler */
+    act.sa_handler = exit_handler;
+    act.sa_flags = 0;
+
+    sigemptyset(&act.sa_mask);
+    sigaction(SIGHUP, &act, NULL);
+    sigaction(SIGTERM, &act, NULL);
+    sigaction(SIGINT, &act, NULL);
+    sigaction(SIGALRM, &act, NULL);
+
     while ( 1 )
     {
         int option_index = 0;
@@ -80,6 +99,16 @@ int main(int argc, char *argv[])
     ret = init_vmi(&vminspect);
     if ( ret )
         goto error;
+
+    while ( !interrupted ) {
+        printf("Waiting for events\n");
+        status = vmi_events_listen(vminspect.vmi,500);
+        if ( status != VMI_SUCCESS )
+        {
+            printf("Exiting\n");
+            interrupted = -1;
+        }
+    }
 
     free_resources();
 

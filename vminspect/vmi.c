@@ -1,8 +1,45 @@
+#include <inttypes.h>
 #include <stdlib.h>
 
 #include "vmi.h"
 
-int vmi_init_libvmi(struct vminspect *vminspect)
+/* XXX: Testing callback on CR3 write access */
+static event_response_t vmi_callback_cr3(vmi_instance_t vmi, vmi_event_t* event)
+{
+    vmi_pid_t pid = -1;
+
+    vmi_dtb_to_pid(vmi, event->reg_event.value, &pid);
+    printf("PID %i with CR3=0x%"PRIx64" on vcpu %"PRIu32". Previous CR3=0x%"PRIx64"\n",
+            pid, event->reg_event.value, event->vcpu_id, event->reg_event.previous);
+
+    return 0;
+}
+
+static int vmi_init_events(struct vminspect *vminspect)
+{
+    status_t status;
+
+    /* Register CR3 event (x86) */
+    memset(&vminspect->event_cr3, 0, sizeof(vmi_event_t));
+    SETUP_REG_EVENT(&vminspect->event_cr3, CR3, VMI_REGACCESS_W, 0, vmi_callback_cr3);
+
+    status = vmi_register_event(vminspect->vmi, &vminspect->event_cr3);
+    if ( status == VMI_FAILURE )
+        printf("%s: Cannot register CR3 event\n", __FUNCTION__);
+
+    return 0;
+}
+
+static void vmi_cleanup_events(struct vminspect *vminspect)
+{
+    if ( vmi_are_events_pending(vminspect->vmi) > 0 )
+        vmi_events_listen(vminspect->vmi, 0);
+
+    vmi_clear_event(vminspect->vmi, &vminspect->event_int3, NULL);
+    vmi_clear_event(vminspect->vmi, &vminspect->event_cr3, NULL);
+}
+
+static int vmi_init_libvmi(struct vminspect *vminspect)
 {
     status_t ret;
     vmi_init_data_t *init_data = malloc(sizeof(vmi_init_data_t) +
@@ -28,7 +65,7 @@ int vmi_init_libvmi(struct vminspect *vminspect)
     return 0;
 }
 
-int vmi_init_altp2m(struct vminspect *vminspect)
+static int vmi_init_altp2m(struct vminspect *vminspect)
 {
     int ret;
     xc_interface *xch = vminspect->xc.xch;
@@ -89,6 +126,10 @@ int init_vmi(struct vminspect *vminspect)
     if ( ret )
         goto err;
 
+    ret = vmi_init_events(vminspect);
+    if ( ret )
+        goto err;
+
     return 0;
 err:
     cleanup_vmi(vminspect);
@@ -101,6 +142,10 @@ void cleanup_vmi(struct vminspect *vminspect)
     int ret;
     xc_interface *xch = vminspect->xc.xch;
     uint32_t domain_id = vminspect->xc.domain_id;
+
+    vmi_pause_vm(vminspect->vmi);
+    vmi_cleanup_events(vminspect);
+    vmi_resume_vm(vminspect->vmi);
 
     ret = xc_altp2m_switch_to_view(xch, domain_id, 0);
     if ( ret )
