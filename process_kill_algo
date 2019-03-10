@@ -1,0 +1,53 @@
+								 
+								 ----------------------------
+								| VMI Process Kill Algorithm |
+								 ----------------------------
+
+1) Create and initialize a VMI instance
+
+2) Get the virutual address of any frequent sys_call that you want to break into (e.g. sys_opctl)
+ 2.1) Find the relevant kernel symbol and then use that kernel symbol to get the relevant virtual address to work with.
+
+3) Create two "global" vmi event instances. One will be used for the breakpoint and the other for single_stepping.
+
+ 3.1) Register relevant callbak functions where we will be taking care of the process killing.
+
+
+4) Back the original data/instruction from the breakpoint of the routine to break into. And then set the breakpoint using virtual address in step 2.1.
+
+5) Wait in loop to listen for the event
+
+6) Once breakpoint event is received
+
+ 6.1) Set the global flag (kill_flag) to indicate that the target process is ready to be killed
+ 6.2) Replace the breakpoint with the original instruction
+ 6.3) Regiester the single_step event to receive another event.
+
+7) Once single_step event is received
+
+7.1) Save the vcpu context (data regs, instruction & stack pointers etc)
+7.2) Move the required parameters for the sys_kill sys call. Target process PID goes into RDI in the code.
+7.3) Make space on the stack and push the original EIP as the return pointer 
+7.4) Point the current EIP to the sys_kill (after the getting the VA of the sys_kill routine)
+7.5) After killing, backup the first instruction and place another breakpoint there.
+7.6) Remove the single stepping event
+
+8) Once breakpoint event is received
+
+8.1) Set the global kill flag to success to hint the calling fuction
+8.2) Restore the original instuction at breakpoint to remove it
+8.3) Restore the vcpu state/context
+8.4) Register stepping event to do one more step
+
+9) Once single_step event is received
+
+9.1) Set the global flag (interrupted) to indicate that the work is done.
+9.2) Remove the single stepping event
+
+10) After breaking out of the event listening loop
+10.1) Replace the original instruction one more time just to be sure 
+10.2) Destroy the VMI instance and exit 
+
+
+Note: 
+* The code is written for intel architecture. So for ARM, we might need to change the way parameters are placed for function calling and other stack manipulations.
