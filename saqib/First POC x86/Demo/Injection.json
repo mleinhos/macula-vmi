@@ -1,0 +1,154 @@
+{
+  "Event_list": [
+  {
+  "Event": "Allocating Space",
+  "API_count": 4,
+  "API_list": [
+   
+    {
+      "api_name":"NtProtectVirtualMemory",
+      "argument_count":2,
+      "args":[
+        {"4":"Arg4"},
+        {"5":"arg5"}
+        
+        ]
+    },
+    {
+      "api_name":"NtAllocateVirtualMemory",
+      "argument_count":2,
+      "args":[
+        {"4":"Arg4"},
+        {"5":"arg5"}
+        ]
+    },
+    {
+      "api_name":"NtOpenDirectoryObject",
+      "argument_count":2,
+      "args":[
+        {"4":"Arg4"},
+        {"5":"arg5"}
+        ]
+    },
+    {
+      "api_name":"NtOpenSymbolicLinkObject",
+      "argument_count":3,
+     "args":[
+       {"4":"Arg4"},
+        {"5":"arg5"}
+       ]
+    }
+    ]
+  },
+  {
+  "Event": "Loading Dll",
+  "API_count": 5,
+  "API_list": [
+   
+    {
+      "api_name":"NtOpenFile",
+      "argument_count":2,
+      "args":[
+        {"4":"Arg4"},
+        {"5":"arg5"}
+        ]
+    },
+    {
+      "api_name":"NtCreateSection",
+      "argument_count":2,
+      "args":[
+        {"4":"Arg4"},
+        {"5":"arg5"}
+        ]
+    },
+    {
+      "api_name":"NtMapViewOfSection",
+      "argument_count":2,
+      "args":[
+        {"4":"Arg4"},
+        {"5":"arg5"}
+        ]
+    },
+    {
+      "api_name":"NtQuerySection",
+      "argument_count":2,
+      "args":[
+        {"4":"Arg4"},
+        {"5":"arg5"}
+        ]
+    },
+     {
+      "api_name":"NtClose",
+      "argument_count":2,
+      "args":[
+        {"4":"Arg4"},
+        {"5":"arg5"}
+        ]
+    }
+    ]
+  },
+  {
+  "Event": "Defeat ASLR",
+  "API_count": 5,
+  "API_list": [
+   
+    {
+      "api_name":"NtQueryInformationProcess",
+      "argument_count":2,
+      "args":[
+        {"4":"Arg4"},
+        {"5":"arg5"}
+        ]
+    },
+    {
+      "api_name":"NtQueryVirtualMemory",
+      "argument_count":2,
+     "args":[
+       {"4":"Arg4"},
+        {"5":"arg5"}
+       ]
+    },
+    {
+      "api_name":"NtOpenProcessToken",
+      "argument_count":2,
+      "args":[
+        {"4":"Arg4"},
+        {"5":"arg5"}
+        ]
+    },
+    {
+      "api_name":"NtOpenKeyEx",
+      "argument_count":2,
+      "args":[
+        {"4":"Arg4"},
+        {"5":"arg5"}
+        ]
+    },
+    {
+      "api_name":"NtOpenProcess",
+      "argument_count":2,
+      "args":[
+        {"4":"Arg4"},
+        {"5":"arg5"}
+        ]
+    },
+    {
+      "api_name":"NtReadVirtualMemory",
+      "argument_count":2,
+      "args":[
+        {"4":"Arg4"},
+        {"5":"arg5"}
+        ]
+    },
+    {
+      "api_name":"NtMapViewOfSection",
+      "argument_count":2,
+      "args":[
+        {"4":"Arg4"},
+        {"5":"arg5"}
+        ]
+    }
+    ]
+  }
+  ]
+}

@@ -1,0 +1,122 @@
+{
+  "Event_list": [
+  {
+  "Event": "Code Injection",
+  "API_count": 5,
+  "API_list": [
+   
+    {
+      "api_name":"Sleep",
+      "argument_count":3,
+      "args":[
+        {"4":"Arg4"},
+        {"5":"arg5"}
+        
+        ]
+    },
+    {
+      "api_name":"CreateFile",
+      "argument_count":3,
+      "args":[
+        {"4":"Arg4"},
+        {"5":"arg5"}
+        ]
+    },
+    {
+      "api_name":"NTCreateRemoteThread",
+      "argument_count":3,
+      "args":[
+        {"4":"Arg4"},
+        {"5":"arg5"}
+        ]
+    },
+    {
+      "api_name":"ResumeThread",
+      "argument_count":3,
+     "args":[
+       {"4":"Arg4"},
+        {"5":"arg5"}
+       ]
+    }
+    ]
+  },
+  {
+  "Event": "Cloning",
+  "API_count": 5,
+  "API_list": [
+   
+    {
+      "api_name":"NtSleep",
+      "argument_count":3,
+      "args":[
+        {"4":"Arg4"},
+        {"5":"arg5"}
+        ]
+    },
+    {
+      "api_name":"NtSleep",
+      "argument_count":3,
+      "args":[
+        {"4":"Arg4"},
+        {"5":"arg5"}
+        ]
+    },
+    {
+      "api_name":"NtSleep",
+      "argument_count":3,
+      "args":[
+        {"4":"Arg4"},
+        {"5":"arg5"}
+        ]
+    },
+    {
+      "api_name":"NtSleep",
+      "argument_count":3,
+      "args":[
+        {"4":"Arg4"},
+        {"5":"arg5"}
+        ]
+    }
+    ]
+  },
+  {
+  "Event": "File open suspevious directory",
+  "API_count": 5,
+  "API_list": [
+   
+    {
+      "api_name":"NtSleep",
+      "argument_count":3,
+      "args":[
+        {"4":"Arg4"},
+        {"5":"arg5"}
+        ]
+    },
+    {
+      "api_name":"NtSleep",
+      "argument_count":3,
+     "args":[
+       {"4":"Arg4"},
+        {"5":"arg5"}
+       ]
+    },
+    {
+      "api_name":"NtSleep",
+      "argument_count":3,
+      "args":[
+        {"4":"Arg4"},
+        {"5":"arg5"}
+        ]
+    },
+    {
+      "api_name":"NtSleep",
+      "argument_count":3,
+      "args":[
+        {"4":"Arg4"},
+        {"5":"arg5"}
+        ]
+    }
+    ]
+  }
+  ]
+}

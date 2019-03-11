@@ -1,0 +1,1 @@
+sudo ./drakvuf -r /root -x procmon -x debugmond 16 -x poolmon -x objmon -x exmon -x filetracer -x filedelete -x ssdtmon -x socketmon -x regmon -x cpuidmon 

@@ -1,0 +1,4 @@
+start_vm.sh : Following script remove snapshot/creat snapshot then it starts vm and run drakvuf . 
+shutdown_script.sh : For testing purpose it gets pid of explorer and tries to kill it using injector or destroy VM depending upon input.
+create_iso.sh : This script create iso for each file in directory. This script was used in bulk log generation 
+replace.sh : small utility to replace config file
