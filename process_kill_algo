@@ -45,7 +45,7 @@
 9.2) Remove the single stepping event
 
 10) After breaking out of the event listening loop
-10.1) Replace the original instruction one more time just to be sure 
+10.1) Replace the original instruction and resume exection. 
 10.2) Destroy the VMI instance and exit 
 
 
