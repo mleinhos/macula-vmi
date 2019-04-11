@@ -1,5 +1,5 @@
 /*
-Description: Monitor Linux syscalls outside of OS Virtual Machine Introspection (VMI)
+Description: Monitor Linux syscalls outside of OS via Virtual Machine Introspection (VMI)
 Company: Numen Inc.
 Developers: Ali Islam
 Version: 1.0
