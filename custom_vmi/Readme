@@ -1,0 +1,8 @@
+* Nothing extra needed to compile apart from vmi library (gcc -lvmi nvmi.c)
+
+* This assumes that you have offsets in the /etc/libvmi.conf. Reakall support can be easily added
+
+* The Sysmap file typically have multiple entries for the same syscalls to support different modes etc but they all have the same address in memory. 
+  So I would highly recommend to make your sysmap file uniq using the first address column (something like sort -u -t ' ' -k 1,1 sysmap_in >sysmp
+  
+* If your domain kernel is being randomized in memory, you can put nokaslr to the bootloader (grub etc). Kaslr support can be added in future.
