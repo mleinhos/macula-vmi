@@ -356,7 +356,9 @@ graceful_exit:
 
     	vmi_write_8_va(vmi, sys_calls[i]->sys_addr, 0, &sys_calls[i]->backup_byte);//replace orig instruction
 
-    	free(sys_calls[i]);//free the dynamic memory
+    	if(sys_calls[i])
+
+			free(sys_calls[i]);//free the dynamic memory
 
     }
 
