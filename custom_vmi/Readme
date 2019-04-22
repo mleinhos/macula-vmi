@@ -1,6 +1,7 @@
-* Nothing extra needed to compile apart from vmi library (gcc -lvmi nvmi.c)
+* Use the following to compile (adjust paths according to your machine)
+--> gcc nvmi.c -lvmi -lxenctrl -lxenlight -lglib-2.0 -I/usr/include/glib-2.0/ -I/usr/lib/i386-linux-gnu/glib-2.0/include/
 
-* This assumes that you have offsets in the /etc/libvmi.conf. Reakall support can be easily added
+* This assumes that you have offsets in the /etc/libvmi.conf. Reakall format support can be easily added if needed.
 
 * The Sysmap file typically have multiple entries for the same syscalls to support different modes etc but they all have the same address in memory. 
   So I would highly recommend to make your sysmap file uniq using the first address column (something like sort -u -t ' ' -k 1,1 sysmap_in >sysmp
