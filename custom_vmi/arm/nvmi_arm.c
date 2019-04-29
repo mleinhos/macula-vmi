@@ -31,18 +31,97 @@ Output: Syscall_name, PID, Processname
 #include <xen/vm_event.h>
 #include <xenctrl_compat.h>
 
+#include "process_kill_helper.h"
 
 static int act_calls = 0;
 uint16_t sm1_view;
 static uint32_t trap_arm = 0xD4000003;
 
+#define KILL_PID_NONE ((vmi_pid_t)-1)
+static vmi_pid_t killpid = KILL_PID_NONE;
 
 
 /* Signal handler */
 static struct sigaction act;
 static int interrupted = 0;
 static void close_handler(int sig){
-	interrupted = sig;
+	int rc = 0;
+
+	if (SIGHUP == sig) {
+		rc = get_pid_from_file(PID_FILE_LOC, &killpid);
+		if (rc) {
+			fprintf(stderr, "Failed to read pid from file %s", PID_FILE_LOC);
+			killpid = KILL_PID_NONE;
+		}
+	}
+	else
+	{
+		interrupted = sig;
+	}
+}
+
+// Kills the current domU process by corrupting its state upon a
+// syscall. May need further work.
+//
+// Reference linux kernel:
+// arch/x86/entry/entry_64.S
+// arch/arm64/kernel/entry.S
+
+static void
+linux_kill_curr_proc (vmi_instance_t vmi, vmi_event_t * event)
+{
+	// We're at the entry of a syscall.
+	uint64_t stack[6] = {0};
+	uint64_t sp_val = 0;
+	status_t status = VMI_SUCCESS;
+	size_t bytes_read = 0;
+	static int call_ct = 0;
+
+#ifdef ARM64
+	// We may need to clobber X0 ... X5 for the ARM case
+	reg_t regsp = SP_USR;
+#else
+	reg_t regsp = RSP;
+#endif
+
+//#ifdef ARM64
+	status = vmi_set_vcpureg(vmi, 0, X0, event->vcpu_id);
+	if (VMI_FAILURE == status)
+	{
+		fprintf(stderr, "Failed to write X0 register\n");
+		goto exit;
+	}
+	status = vmi_set_vcpureg(vmi, 0, X1, event->vcpu_id);
+	if (VMI_FAILURE == status)
+	{
+		fprintf(stderr, "Failed to write X1 register\n");
+		goto exit;
+	}
+	status = vmi_set_vcpureg(vmi, 0, X2, event->vcpu_id);
+	if (VMI_FAILURE == status)
+	{
+		fprintf(stderr, "Failed to write X2 register\n");
+		goto exit;
+	}
+	status = vmi_set_vcpureg(vmi, 0, X3, event->vcpu_id);
+	if (VMI_FAILURE == status)
+	{
+		fprintf(stderr, "Failed to write X3 register\n");
+		goto exit;
+	}
+	status = vmi_set_vcpureg(vmi, 0, X4, event->vcpu_id);
+	if (VMI_FAILURE == status)
+	{
+		fprintf(stderr, "Failed to write X4 register\n");
+		goto exit;
+	}
+//#endif
+
+exit:
+	++call_ct;
+	if (100 == call_ct) {
+		killpid = KILL_PID_NONE;
+	}
 }
 
 
@@ -411,17 +490,19 @@ event_response_t hook_cb(vmi_instance_t vmi, vmi_event_t *event) {
 
 	}
 
-
 	vmi_get_vcpureg(vmi, &ttbr0, TTBR0, event->vcpu_id);
 	vmi_get_vcpureg(vmi, &ttbr1, TTBR1, event->vcpu_id);
-
-
-
 
 	if (1 == get_proc_name_lnx_1(vmi, event->vcpu_id, &pid, procname)){
 
 		printf("NumenVmi Log: sys_call=%s,	process_name=%s,	pid=%d, TTBR0=%" PRIx32 ",	TTBR1=%" PRIx32 "\n",
 				h_node_temp->name , procname,pid, (unsigned int)ttbr0, (unsigned int)ttbr1);
+	}
+
+	if (pid == killpid) {
+		printf ("Attempting to kill process PID=%d\n", pid);
+		printf ("\tname: %s\n", procname);
+		linux_kill_curr_proc(vmi, event);
 	}
 
 	if (event->slat_id == sm1_view)
