@@ -103,7 +103,7 @@ enum syscall_numbers {
     // etc etc .....
 };
 
-typedef uint16_t syscall_number_t;
+typedef uint32_t syscall_number_t;
 
 enum syscall_arg_types {
     // Scalar types: values held in syscall event's args
@@ -153,7 +153,7 @@ typedef uint32_t syscall_flags_t;
 typedef struct _syscall_event {
     syscall_number_t    num;
     syscall_flags_t     flags;
-    syscall_arg_count_t arg_ct;
+    uint32_t            arg_ct;
     syscall_arg_t       args[SYSCALL_MAX_ARGS];
 
     // Variable-length data associated with this syscall event
