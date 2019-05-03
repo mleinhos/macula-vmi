@@ -30,6 +30,10 @@
 
 #include "process_kill_helper.h"
 
+static vmi_pid_t killpid = KILL_PID_NONE;
+static int act_calls = 0;
+
+
 /* Signal handler */
 static struct sigaction act;
 static int interrupted = 0;
@@ -117,14 +121,8 @@ exit:
 }
 
 
-
-
-
-
-
-
-int inst_syscall(nif_xen_monitor *xa, const char * in_path){
-
+int inst_syscall(nif_xen_monitor *xa, const char * in_path)
+{
 	FILE *input_file = NULL;
 	char *name = NULL;
 	char one_line[1024];
@@ -133,33 +131,28 @@ int inst_syscall(nif_xen_monitor *xa, const char * in_path){
 	uint32_t backup_smc1;
 	uint32_t backup_smc2;
 
-
 	input_file = fopen(in_path, "r+");
-
 
 	if (NULL == input_file) {
 		printf("\nCant open system map file\n");
 		return -1;
 	}
 
-	while( fgets( one_line, 1000, input_file) != NULL){
-
-		if(NULL == (name = strstr(one_line, " T "))){ //find the global text section symbols
+	while (fgets( one_line, 1000, input_file) != NULL)
+	{
+		if (NULL == (name = strstr(one_line, " T "))) { //find the global text section symbols
 			//printf("\nDidn't find any text symbol");
 			continue;
 		}
 
 		//Doing this coz case insensitive function was behaving weirdly
-		if(NULL==strstr(one_line, " sys_")){
-			if(NULL==strstr(one_line, " SyS_")){
-
-				if(NULL==strstr(one_line, " Sys_")){ //possible sys_call
-
+		if (NULL==strstr(one_line, " sys_")) {
+			if (NULL==strstr(one_line, " SyS_")) {
+				if(NULL==strstr(one_line, " Sys_")) { //possible sys_call
 					//printf("\nFound text_sec but didn't find any sys_call symbol in %s", one_line);
 					continue;
 				}
 			}//second if
-
 		}//first if
 
 		*name = '\0';
@@ -169,21 +162,17 @@ int inst_syscall(nif_xen_monitor *xa, const char * in_path){
 		if(NULL != (nl =strchr(name, '\n')))
 			*nl='\0';
 
-
-
 		if ( (VMI_FAILURE == vmi_read_32_va(xa->vmi, sys_va, 0, &backup_smc1)) ||
-
-			 (VMI_FAILURE == vmi_read_32_va(xa->vmi, sys_va+4, 0, &backup_smc2)) ) {
-
+		     (VMI_FAILURE == vmi_read_32_va(xa->vmi, sys_va+4, 0, &backup_smc2)) )
+		{
 			printf("\nUnable to read %s() instructions from va:%" PRIx64 " for smc backup", name, sys_va);
 			continue;
 		}
 
-
 		//printf("\nAddress Extracted: %s Address Converted: %" PRIx64 " Backup Inst: %" PRIx32 "\n", one_line, sys_va, backup_smc1);
 
-
-		if(NULL == setup_spg_bp(xa, sys_va, name, backup_smc1, backup_smc2)){
+		if (NULL == setup_spg_bp(xa, sys_va, name, backup_smc1, backup_smc2))
+		{
 			printf("\nFailed to add pg/bp for %s at %" PRIx64 "", name, sys_va);
 			return -1;
 		}
@@ -192,7 +181,7 @@ int inst_syscall(nif_xen_monitor *xa, const char * in_path){
 		if(act_calls == MAX_CALLS-1)//max syscalls that we want to monitor
 			break;
 
-	}//while ends
+	} //while ends
 
 	fclose(input_file);
 

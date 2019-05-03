@@ -16,6 +16,7 @@
 
 #include <libxl.h>
 #include <xenctrl.h>
+#include <glib.h>
 
 #define MAX_VCPUS 8
 #define MAX_CALLS 400

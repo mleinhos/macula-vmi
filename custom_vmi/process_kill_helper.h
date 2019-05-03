@@ -5,11 +5,13 @@
 extern "C" {
 #endif
 
-#define PID_FILE_LOC "/tmp/pidfile"
-	
 #include <libvmi/libvmi.h>
 #include <json-c/json.h>
 
+#define PID_FILE_LOC "/tmp/pidfile"
+#define KILL_PID_NONE ((vmi_pid_t)-1)
+
+    
 int
 get_pid_from_file(const char* path,
 		  vmi_pid_t* pid);

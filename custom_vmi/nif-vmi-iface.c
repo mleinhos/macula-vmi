@@ -10,7 +10,7 @@
  */
 
 
-#include "nvmi-iface.h"
+#include "nif-vmi-iface.h"
 
 #if defined(ARM64)
 
@@ -229,6 +229,7 @@ setup_spg_bp (nif_xen_monitor *xa, addr_t va, const char *name, uint32_t backup_
 		printf("Failed to write interrupt to shadow page\n");
 		goto done;
 	}
+#endif
 
 	g_hash_table_insert(pgnode_new->offset_bp_mappings,
 			    GSIZE_TO_POINTER(shadow_offset),
@@ -246,7 +247,7 @@ done:
 
 event_response_t singlestep_cb(vmi_instance_t vmi, vmi_event_t *event)
 {
-	event-> slat_id = exe_view;
+	event->slat_id = exe_view;
 
 	return (VMI_EVENT_RESPONSE_TOGGLE_SINGLESTEP|
 		VMI_EVENT_RESPONSE_VMM_PAGETABLE_ID);
@@ -280,6 +281,35 @@ static int  setup_ss_events (vmi_instance_t vmi)
 }
 #endif
 
+static event_response_t
+cr3_cb(vmi_instance_t vmi, vmi_event_t *event) {
+
+
+	event->x86_regs->cr3 = event->reg_event.value;
+
+	//Flush process_related caches for clean start and consistency
+
+	vmi_symcache_flush(vmi);
+	vmi_pidcache_flush(vmi);
+	vmi_v2pcache_flush(vmi, event->reg_event.previous);
+	vmi_rvacache_flush(vmi);
+
+
+	return VMI_EVENT_RESPONSE_NONE;
+}
+
+static event_response_t
+mem_intchk_cb (vmi_instance_t vmi, vmi_event_t *event) {
+
+
+
+	printf("\nIntegrity check served\n");
+
+	event->slat_id = 0;
+
+	return VMI_EVENT_RESPONSE_TOGGLE_SINGLESTEP
+		| VMI_EVENT_RESPONSE_VMM_PAGETABLE_ID;
+}
 
 void
 nvmi_fini(void)
@@ -299,9 +329,8 @@ nvmi_fini(void)
 	vmi_destroy(xa.vmi);
 }
 
-
 status_t
-nvmi_init()
+nvmi_init(const char * name)
 {
 	status_t status;
 	vmi_event_t trap_event, mem_event, cr3_event;
