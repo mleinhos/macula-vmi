@@ -9,7 +9,7 @@ def main():
     context = zmq.Context()
 
     # First, connect our subscriber socket
-    subscriber = context.socket(zmq.PULL)
+    subscriber = context.socket(zmq.PAIR)
     subscriber.connect('tcp://localhost:5555')
     #subscriber.setsockopt(zmq.SUBSCRIBE, b'')
 
