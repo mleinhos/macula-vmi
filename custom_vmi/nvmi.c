@@ -31,9 +31,13 @@ Output: Syscall_name, PID, Processname, CR3
 #include <xenevtchn.h>
 #include <xen/vm_event.h>
 #include <xenctrl_compat.h>
+#include <czmq.h>
+#include <pthread.h>
 
-
-
+//#define ZMQ_HOST "localhost"
+//#define ZMQ_EVENT_CHANNEL "tcp://localhost:5555"
+#define ZMQ_EVENT_CHANNEL "tcp://*:5555"
+#define ZMQ_REQUEST_CHANNEL "tcp://localhost:5556"
 
 
 static vmi_event_t ss_event[MAX_VCPUS];
@@ -41,7 +45,11 @@ static int act_calls = 0;
 uint16_t exe_view;
 static uint8_t trap_cc = 0xCC;
 
+static void * zmq_context = NULL;
+static void * zmq_event_socket  = NULL;
+static void * zmq_request_socket  = NULL;
 
+static pthread_t pth_request_servicer;
 
 /* Signal handler */
 static struct sigaction act;
@@ -355,7 +363,7 @@ static int  setup_ss_events (vmi_instance_t vmi)
 }
 
 
-	static addr_t
+static addr_t
 get_curr_task(vmi_instance_t vmi, addr_t gs_base)
 {
 	status_t status;
@@ -521,11 +529,21 @@ event_response_t hook_cb(vmi_instance_t vmi, vmi_event_t *event) {
 	}
 
 
-	if(data_found)
+	if(data_found) {
+		char data[128];
+		size_t len = 0;
+		int rc = 0;
 		printf("NumenVmi Log: sys_call=%s, process_name=%s, pid=%d, cr3=%" PRIx16 "\n",
 				h_node_temp->name , procname,pid, (unsigned int)cr3);
 
+		len = snprintf (data, sizeof(data), "%s proc=%s pid=%d cr3=%llx\n",
+				h_node_temp->name , procname,pid, (unsigned int)cr3);
 
+		rc = zmq_send (zmq_event_socket, data, len+1, 0);
+		if (rc < 0) {
+			fprintf(stderr, "zmq_send() failed: %d\n", rc);
+		}
+	}
 done:
 
 	event->interrupt_event.reinject = 0; 
@@ -574,6 +592,7 @@ int inst_syscall(nif_xen_monitor *xa, const char * in_path){
 
 		}//first if
 
+		
 		*name = '\0';
 		sys_va = (addr_t) strtoul(one_line, NULL, 16);
 
@@ -581,12 +600,33 @@ int inst_syscall(nif_xen_monitor *xa, const char * in_path){
 		if(NULL != (nl =strchr(name, '\n')))
 			*nl='\0';
 
+		printf ("Instrumenting symbol %s\n", name);
+
+		// skip some symbols
+		if (!strcmp(name, "sys_ni_syscall")           ||
+		    !strcmp(name, "sys_call_table")           ||
+		    !strncmp(name, "sys_dmi", 7)              ||
+		    !strcmp(name,  "sys_tz")                  || /* used by gettimeofday */
+		    !strcmp(name,  "sys_tracepoint_refcount") ||
+		    !strcmp(name,  "sys_table")               ||
+		    !strcmp(name,  "sys_perf_refcount_enter") ||
+		    !strcmp(name,  "sys_perf_refcount_exit")   ) {
+			printf ("Skipping symbol %s\n", name);
+			continue;
+		}
+
+//		if (strncmp(name, "__x64_sys_", 10)) {
+//			printf ("Skipping symbol %s\n", name);
+//			continue;
+//		}
+
+		if (VMI_FAILURE == vmi_read_8_va(xa->vmi, sys_va, 0, &backup_byte)) {
+			printf("Failed to read byte at %" PRIx64 " for symbol %s\n", sys_va, name);
+			break;
+		}
 
 
-		vmi_read_8_va(xa->vmi, sys_va, 0, &backup_byte);
-
-
-		//printf("\nAddress Extracted: %s Address Converted: %" PRIx64 " Backup Byte: %" PRIx8 "\n", one_line, sys_va, backup_byte);
+		printf("Address Extracted: %s Address Converted: %" PRIx64 " Backup Byte: %" PRIx8 "\n", one_line, sys_va, backup_byte);
 
 
 		if(NULL == setup_spg_bp(xa, sys_va, name, backup_byte)){
@@ -619,7 +659,7 @@ static void clean_xen_monitor(nif_xen_monitor *xa)
 		if(0!= xc_interface_close(xa->xci))
 			printf("Failed to close connection to xen interface\n");
 
-	xc_domain_setmaxmem(xa->xci, xa->domain_id, xa->orig_mem_size);
+//	xc_domain_setmaxmem(xa->xci, xa->domain_id, xa->orig_mem_size);
 
 
 
@@ -718,10 +758,119 @@ mem_intchk_cb (vmi_instance_t vmi, vmi_event_t *event) {
 }
 
 
+//static void
+//comms_request_listener_thread (void * args)
+static void *
+comms_request_listener_thread (void * args)
+{
+	int rc = 0;
+
+	void * subscriber = zmq_socket (zmq_context, ZMQ_PAIR);
+	if (NULL == subscriber) {
+		rc = zmq_errno();
+		fprintf(stderr, "zmq_socket() failed");
+		goto exit;
+	}
+
+	zmq_connect (subscriber, ZMQ_REQUEST_CHANNEL);
+
+	while (true) {
+		char msg[30] = {0};
+		vmi_pid_t pid = -1;
+
+		//char * str = zstr_recv(subscriber);
+		/*
+		if (NULL == str) {
+			fprintf (stderr, "Received empty string. All done.\n");
+			break;
+		}
+		*/
+
+
+		rc = zmq_recv (subscriber, msg, sizeof(msg), 0);
+		if (rc <= 0) {
+			fprintf (stderr, "Received empty string. All done.\n");
+			break;
+		}
+		//pid = strtoul (msg, NULL, 0);
+
+		pid = *(vmi_pid_t *) msg;
+		printf ("received raw pid --> %d\n", pid);
+		
+		//free (str);
+	}
+	
+exit:
+	return;
+}
+
+static void
+comms_fini(void)
+{
+    if (zmq_event_socket)  zmq_close (zmq_event_socket);
+
+
+    if (zmq_context) zmq_ctx_destroy (zmq_context);
+
+    pthread_join (pth_request_servicer, NULL);
+    
+    if (zmq_request_socket)  zmq_close (zmq_request_socket);
+
+    zmq_context = NULL;
+    zmq_event_socket  = NULL;
+    zmq_request_socket  = NULL;
+}
+
+static int
+comms_init(void)
+{
+    int rc = 0;
+    
+    zmq_context = zmq_ctx_new();
+    if (NULL == zmq_context) {
+	    rc = errno;
+	    fprintf(stderr, "zmq_ctx_new() failed\n");
+	    goto exit;
+    }
+
+    zmq_event_socket  = zmq_socket (zmq_context, ZMQ_PUSH);
+    if (NULL == zmq_event_socket) {
+	    rc = zmq_errno();
+	    fprintf(stderr, "zmq_socket() failed");
+	    goto exit;
+    }
+
+//    rc = zmq_connect (zmq_event_socket, ZMQ_EVENT_CHANNEL);
+    rc = zmq_bind (zmq_event_socket, ZMQ_EVENT_CHANNEL);
+    if (rc) {
+	fprintf (stderr, "zmq_connect(" ZMQ_EVENT_CHANNEL ") failed: %d\n", rc);
+	goto exit;
+    }
+    /*
+    zmq_request_socket  = zmq_socket (zmq_context, ZMQ_PAIR);
+    rc = zmq_connect (zmq_request_socket, ZMQ_REQUEST_CHANNEL);
+    if (rc) {
+	fprintf (stderr, "zmq_connect(" ZMQ_REQUEST_CHANNEL ") failed: %d\n", rc);
+	goto exit;
+    }
+    */
+    //zmq_threadstart (comms_request_listener_thread, NULL);
+
+    rc = pthread_create (&pth_request_servicer, NULL, comms_request_listener_thread, NULL);
+    if (rc) {
+	    fprintf (stderr, "pthread_create() failed\n");
+	    goto exit;
+    }
+
+exit:
+    return rc;
+}
+
+
 int main(int argc, char **argv) {
 
 	if (argc != 3) {
-		printf("Usage: %s <domain name> <path to system_map>\n");
+		printf("Usage: %s <domain name> <path to system_map>\n", argv[0]);
 		return 1;
 	}
 
@@ -730,7 +879,7 @@ int main(int argc, char **argv) {
 	const char *in_path = argv[2];
 	nif_xen_monitor xa;
 	vmi_event_t trap_event, mem_event, cr3_event;
-
+	int rc = 0;
 
 	/* Handle ctrl+c properly */
 	act.sa_handler = close_handler;
@@ -741,7 +890,10 @@ int main(int argc, char **argv) {
 	sigaction(SIGINT,  &act, NULL);
 	sigaction(SIGALRM, &act, NULL);
 
-
+	rc = comms_init();
+	if (rc) {
+	    return -1;
+	}
 
 
 	// Initialize the libvmi library.
@@ -794,7 +946,7 @@ int main(int argc, char **argv) {
 		goto graceful_exit;
 	}
 
-	if (-1 == inst_syscall(&xa, in_path))
+	if (0 != inst_syscall(&xa, in_path))
 		goto graceful_exit;
 
 
@@ -802,6 +954,7 @@ int main(int argc, char **argv) {
 		goto graceful_exit;
 
 
+	//SETUP_INTERRUPT_EVENT(&trap_event, hook_cb);
 	SETUP_INTERRUPT_EVENT(&trap_event, 0, hook_cb);
 	trap_event.data = &xa;
 	if (VMI_SUCCESS != vmi_register_event(xa.vmi, &trap_event)){
@@ -833,10 +986,6 @@ graceful_exit:
 
 	vmi_pause_vm(xa.vmi);
 
-	fflush(stdout);
-	g_hash_table_destroy(xa.shadow_pnode_mappings);
-	g_hash_table_destroy(xa.pframe_sframe_mappings);
-
 	destroy_views(&xa, xa.domain_id);
 
 	clean_xen_monitor(&xa);
@@ -844,5 +993,12 @@ graceful_exit:
 	vmi_resume_vm(xa.vmi);
 
 	vmi_destroy(xa.vmi);
+
+	comms_fini();
+
+	fflush(stdout);
+	g_hash_table_destroy(xa.shadow_pnode_mappings);
+	g_hash_table_destroy(xa.pframe_sframe_mappings);
+
 	return 0;
 }

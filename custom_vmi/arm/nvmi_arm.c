@@ -30,8 +30,15 @@ Output: Syscall_name, PID, Processname
 #include <xenevtchn.h>
 #include <xen/vm_event.h>
 #include <xenctrl_compat.h>
+#include <zmq.h>
+#include <pthread.h>
 
-#include "process_kill_helper.h"
+//#include "process_kill_helper.h"
+
+
+#define ZMQ_EVENT_CHANNEL "tcp://*:5555"
+#define ZMQ_REQUEST_CHANNEL "tcp://localhost:5556"
+
 
 static int act_calls = 0;
 uint16_t sm1_view;
@@ -40,6 +47,11 @@ static uint32_t trap_arm = 0xD4000003;
 #define KILL_PID_NONE ((vmi_pid_t)-1)
 static vmi_pid_t killpid = KILL_PID_NONE;
 
+static void * zmq_context = NULL;
+static void * zmq_event_socket  = NULL;
+static void * zmq_request_socket  = NULL;
+
+static pthread_t pth_request_servicer;
 
 /* Signal handler */
 static struct sigaction act;
@@ -47,6 +59,8 @@ static int interrupted = 0;
 static void close_handler(int sig){
 	int rc = 0;
 
+	interrupted = sig;
+/*
 	if (SIGHUP == sig) {
 		rc = get_pid_from_file(PID_FILE_LOC, &killpid);
 		if (rc) {
@@ -58,6 +72,7 @@ static void close_handler(int sig){
 	{
 		interrupted = sig;
 	}
+*/
 }
 
 // Kills the current domU process by corrupting its state upon a
@@ -494,9 +509,20 @@ event_response_t hook_cb(vmi_instance_t vmi, vmi_event_t *event) {
 	vmi_get_vcpureg(vmi, &ttbr1, TTBR1, event->vcpu_id);
 
 	if (1 == get_proc_name_lnx_1(vmi, event->vcpu_id, &pid, procname)){
+		char data[128];
+		size_t len = 0;
+		int rc = 0;
 
 		printf("NumenVmi Log: sys_call=%s,	process_name=%s,	pid=%d, TTBR0=%" PRIx32 ",	TTBR1=%" PRIx32 "\n",
 				h_node_temp->name , procname,pid, (unsigned int)ttbr0, (unsigned int)ttbr1);
+
+		len = snprintf (data, sizeof(data), "%s proc=%s pid=%d pid=%d, TTBR0=%" PRIx32 " TTBR1=%" PRIx32 "\n",
+				h_node_temp->name , procname,pid, (unsigned int)ttbr0, (unsigned int)ttbr1);
+
+		rc = zmq_send (zmq_event_socket, data, len+1, 0);
+		if (rc < 0) {
+			fprintf(stderr, "zmq_send() failed: %d\n", rc);
+		}
 	}
 
 	if (pid == killpid) {
@@ -701,6 +727,121 @@ clean:
 	return -1;
 }
 
+//static void
+//comms_request_listener_thread (void * args)
+static void *
+comms_request_listener_thread (void * args)
+{
+	int rc = 0;
+
+	void * subscriber = zmq_socket (zmq_context, ZMQ_PAIR);
+	if (NULL == subscriber) {
+		rc = zmq_errno();
+		fprintf(stderr, "zmq_socket() failed");
+		goto exit;
+	}
+
+	zmq_connect (subscriber, ZMQ_REQUEST_CHANNEL);
+
+	while (true) {
+		char msg[30] = {0};
+		vmi_pid_t pid = -1;
+
+		//char * str = zstr_recv(subscriber);
+		/*
+		if (NULL == str) {
+			fprintf (stderr, "Received empty string. All done.\n");
+			break;
+		}
+		*/
+
+
+		rc = zmq_recv (subscriber, msg, sizeof(msg), 0);
+		if (rc <= 0) {
+			fprintf (stderr, "Received empty string. All done.\n");
+			break;
+		}
+		//pid = strtoul (msg, NULL, 0);
+
+
+		//
+		// Set global killpid: now syscall hook will watch for this pid
+		//
+		
+		pid = *(vmi_pid_t *) msg;
+		printf ("received raw pid --> %d\n", pid);
+
+		killpid = pid;
+
+		//free (str);
+	}
+	
+exit:
+	return;
+}
+
+static void
+comms_fini(void)
+{
+    if (zmq_event_socket)  zmq_close (zmq_event_socket);
+
+
+    if (zmq_context) zmq_ctx_destroy (zmq_context);
+
+    pthread_join (pth_request_servicer, NULL);
+    
+    if (zmq_request_socket)  zmq_close (zmq_request_socket);
+
+    zmq_context = NULL;
+    zmq_event_socket  = NULL;
+    zmq_request_socket  = NULL;
+}
+
+static int
+comms_init(void)
+{
+    int rc = 0;
+    
+    zmq_context = zmq_ctx_new();
+    if (NULL == zmq_context) {
+	    rc = errno;
+	    fprintf(stderr, "zmq_ctx_new() failed\n");
+	    goto exit;
+    }
+
+    zmq_event_socket  = zmq_socket (zmq_context, ZMQ_PAIR);
+    if (NULL == zmq_event_socket) {
+	    rc = zmq_errno();
+	    fprintf(stderr, "zmq_socket() failed");
+	    goto exit;
+    }
+
+//    rc = zmq_connect (zmq_event_socket, ZMQ_EVENT_CHANNEL);
+    rc = zmq_bind (zmq_event_socket, ZMQ_EVENT_CHANNEL);
+    if (rc) {
+	fprintf (stderr, "zmq_connect(" ZMQ_EVENT_CHANNEL ") failed: %d\n", rc);
+	goto exit;
+    }
+    /*
+    zmq_request_socket  = zmq_socket (zmq_context, ZMQ_PAIR);
+    rc = zmq_connect (zmq_request_socket, ZMQ_REQUEST_CHANNEL);
+    if (rc) {
+	fprintf (stderr, "zmq_connect(" ZMQ_REQUEST_CHANNEL ") failed: %d\n", rc);
+	goto exit;
+    }
+    */
+    //zmq_threadstart (comms_request_listener_thread, NULL);
+
+    rc = pthread_create (&pth_request_servicer, NULL, comms_request_listener_thread, NULL);
+    if (rc) {
+	    fprintf (stderr, "pthread_create() failed\n");
+	    goto exit;
+    }
+
+exit:
+    return rc;
+}
+
 
 
 
@@ -716,7 +857,7 @@ int main(int argc, char **argv) {
 	const char *in_path = argv[2];
 	nif_xen_monitor xa;
 	vmi_event_t trap_event, mem_event, cr3_event;
-
+	int rc = 0;
 
 	/* Handle ctrl+c properly */
 	act.sa_handler = close_handler;
@@ -726,6 +867,12 @@ int main(int argc, char **argv) {
 	sigaction(SIGTERM, &act, NULL);
 	sigaction(SIGINT,  &act, NULL);
 	sigaction(SIGALRM, &act, NULL);
+
+
+	rc = comms_init();
+	if (rc) {
+	    return -1;
+	}
 
 
 
@@ -814,5 +961,8 @@ graceful_exit:
 	vmi_resume_vm(xa.vmi);
 
 	vmi_destroy(xa.vmi);
+
+	comms_fini();
+
 	return 0;
 }

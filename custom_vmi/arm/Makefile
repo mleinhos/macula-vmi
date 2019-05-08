@@ -3,7 +3,7 @@ CC = gcc
 CFLAGS = -O3
 TARGET = NInspector
 
-LIBS = -lvmi -lxenctrl -lxenlight -lglib-2.0
+LIBS = -lvmi -lxenctrl -lxenlight -lglib-2.0 -lpthread -lzmq
 DEPS = nvmi.h
 OBJ = nvmi_arm.o ../process_kill_helper.o
 
