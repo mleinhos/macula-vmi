@@ -23,7 +23,7 @@ LIBS = -lvmi -lxenctrl -lxenlight $(shell pkg-config --libs glib-2.0) -lzmq -lpt
 endif
 
 DEPS = nvmi.h
-OBJS = nvmi.o nvmi-main.o nif-vmi-iface.o process_kill_helper.o
+OBJS = nvmi-main.o nif-vmi-iface.o process_kill_helper.o
 
 .PHONY: clean
 

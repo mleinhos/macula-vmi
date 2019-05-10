@@ -27,15 +27,13 @@ get_pid_from_file(const char* path,
 	long int pidval = 0;
 
 	pidfile = fopen(path, "r");
-	if (NULL == pidfile)
-	{
+	if (NULL == pidfile) {
 		rc = errno;
 		perror("fopen");
 		goto exit;
 	}
 
-	if (fread(pidstr, 1, sizeof(pidstr), pidfile) < 1)
-	{
+	if (fread(pidstr, 1, sizeof(pidstr), pidfile) < 1) {
 		rc = errno;
 		printf("File %s is too short\n", path);
 		goto exit;
@@ -43,8 +41,7 @@ get_pid_from_file(const char* path,
 
 	pidval = strtol(pidstr, NULL, 10);
 	if (LONG_MIN == pidval ||
-            LONG_MAX == pidval  )
-	{
+	    LONG_MAX == pidval  ) {
 		rc = errno;
 		printf("File %s has invalid contents\n", path);
 		goto exit;
@@ -54,8 +51,7 @@ get_pid_from_file(const char* path,
 	*pid = pidval;
 
 exit:
-	if (NULL != pidfile)
-	{
+	if (NULL != pidfile) {
 		fclose(pidfile);
 	}
 

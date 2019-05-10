@@ -28,40 +28,40 @@ Developer: Ali Islam
 
 typedef struct {
 
-	libxl_ctx *xcx;
+    libxl_ctx* xcx;
 
-	xc_interface *xci;
+    xc_interface* xci;
 
-	uint32_t domain_id;
+    uint32_t domain_id;
 
-	vmi_instance_t vmi;
+    vmi_instance_t vmi;
 
-	uint64_t orig_mem_size;
-	xen_pfn_t max_gpfn;
+    uint64_t orig_mem_size;
+    xen_pfn_t max_gpfn;
 
 
-	GHashTable *pframe_sframe_mappings; //key:pframe
+    GHashTable* pframe_sframe_mappings; //key:pframe
 
-	GHashTable *shadow_pnode_mappings; //key:shadow
+    GHashTable* shadow_pnode_mappings; //key:shadow
 
 } nif_xen_monitor; //To avoid double pointers
 
 
 typedef struct nif_page_node {
 
-	addr_t      frame;
-	addr_t      shadow_frame;
-	GHashTable *offset_bp_mappings; // key:offset
-	nif_xen_monitor     *xa;
+    addr_t      frame;
+    addr_t      shadow_frame;
+    GHashTable* offset_bp_mappings; // key:offset
+    nif_xen_monitor*     xa;
 } nif_page_node;
 
 
 typedef struct nif_hook_node {
-	addr_t          offset;
-	char 		name[MAX_SNAME_LEN];
-	uint32_t 	backup_smc1; //on sframe
-	uint32_t 	backup_smc2; //on frame
-	nif_page_node *parent;
+    addr_t          offset;
+    char 		name[MAX_SNAME_LEN];
+    uint32_t 	backup_smc1; //on sframe
+    uint32_t 	backup_smc2; //on frame
+    nif_page_node* parent;
 
 } nif_hook_node;
 

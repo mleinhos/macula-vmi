@@ -1,15 +1,19 @@
 /**
- * Description: Header file for the syscall monitoring on ARM and x86.
+ * Description: Header file for the syscall monitoring on ARM and
+ * x86. This defines the interface above the alternate memory views,
+ * single stepping, etc. It facilitates a layer that focuses on
+ * syscall monitoring only.
+ *
  *
  * Version: 3.0
- * 
+ *
  * Company: Numen Inc.
  *
  * Developer: Ali Islam
  */
 
-#ifndef NVMI_H
-#define NVMI_H
+#ifndef NIF_VMI_H
+#define NIF_VMI_H
 
 #include <libvmi/libvmi.h>
 #include <libvmi/events.h>
@@ -24,50 +28,45 @@
 #define PG_OFFSET_BITS 12
 #define DOM_PAGE_SIZE (1 << PG_OFFSET_BITS)
 
-typedef void (*event_callback_t) (vmi_instance_t vmi, vmi_event_t *event);
+/**
+ * Callback received by monitoring layer: it can observe the event but
+ * cannot influence the response performed by the underlying layer.
+ */
+typedef void (*nif_event_callback_t) (vmi_instance_t vmi, vmi_event_t* event, void* arg);
 
-typedef struct
-{
-	libxl_ctx *xcx;
-	xc_interface *xci;
-	uint32_t domain_id;
-	vmi_instance_t vmi;
+/**
+ * Functions return 0 on success, otherwise a positive errno.
+ */
 
-	uint64_t orig_mem_size;
-	xen_pfn_t max_gpfn;
-
-	GHashTable *pframe_sframe_mappings; //key:pframe
-
-	GHashTable *shadow_pnode_mappings; //key:shadow
-
-} nif_xen_monitor; //To avoid double pointers
+int
+nif_init(const char* name);
 
 
-typedef struct nif_page_node
-{
-	addr_t		frame;
-	addr_t		shadow_frame;
-	GHashTable 	*offset_bp_mappings; // key:offset
-	nif_xen_monitor	*xa;
-} nif_page_node;
+void
+nif_fini (void);
 
 
-typedef struct nif_hook_node
-{
-	addr_t			offset;
-	char 			name[MAX_SNAME_LEN];
-	nif_page_node		*parent;
+void
+nif_stop(void);
 
-	event_callback_t	cb1;
-
-#if defined(ARM64)
-	uint32_t 		backup_smc1; //on sframe
-	uint32_t 		backup_smc2; //on frame
-#else
-	uint8_t 		backup_byte;
-#endif
-} nif_hook_node;
+int
+nif_get_vmi (vmi_instance_t* vmi);
 
 
+int
+nif_event_loop (void);
 
-#endif // NVMI_H
+
+int
+nif_enable_monitor (addr_t kva,
+                    const char* name,
+                    nif_event_callback_t pre_cb,
+                    nif_event_callback_t post_cb,
+                    void* cb_arg);
+
+
+int
+nif_disable_monitor (addr_t kva);
+
+
+#endif // NIF_VMI_H
