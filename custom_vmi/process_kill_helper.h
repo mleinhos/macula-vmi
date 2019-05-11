@@ -1,5 +1,5 @@
-#ifndef process_kill_helper_h
-#define process_kill_helper_h
+#ifndef PROCESS_KILL_HELPER_H
+#define PROCESS_KILL_HELPER_H
 
 #ifdef __cplusplus
 extern "C" {
@@ -26,4 +26,4 @@ get_pid_from_file(const char* path,
 }
 #endif
 
-#endif // process_kill_helper_h
+#endif // PROCESS_KILL_HELPER_H

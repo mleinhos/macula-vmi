@@ -561,8 +561,6 @@ static int inst_xen_monitor(const char* name)
 		return -1; // nothing to clean
 	}
 
-
-
 	if (libxl_ctx_alloc(&xa.xcx, LIBXL_VERSION, 0, NULL)) {
 		fprintf(stderr,"Unable to create xl context\n");
 		goto clean;
@@ -671,6 +669,13 @@ graceful_exit:
 	return status;
 }
 
+
+int
+nif_get_vmi (vmi_instance_t * vmi)
+{
+	*vmi = xa.vmi;
+	return 0;
+}
 
 void
 nif_stop (void)

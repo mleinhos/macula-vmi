@@ -3,7 +3,7 @@ _arch = $(shell uname -m)
 
 CC = gcc
 
-CFLAGS = -O3
+#CFLAGS = -O3
 CFLAGS = -O0 -ggdb
 
 TARGET = NInspector
@@ -24,12 +24,6 @@ endif
 
 DEPS = nvmi.h
 OBJS = nvmi-main.o nif-vmi-iface.o process_kill_helper.o
-
-.PHONY: clean
-
-
-%.o: %.c $(DEPS)
-	$(CC) -c -o $@ $< $(CFLAGS)  $(INC)
 
 .PHONY: clean
 
