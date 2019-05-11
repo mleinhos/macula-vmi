@@ -8,8 +8,9 @@ CFLAGS = -O0 -ggdb
 
 TARGET = NInspector
 
-ifeq ($(_arch), "aarch64")
+ifeq ($(_arch), aarch64)
 # ARM64 definitions
+CFLAGS += -DARM64
 INC = -I/usr/include/glib-2.0/ -I/usr/lib/aarch64-linux-gnu/glib-2.0/include/ -I..
 LIBS = -lvmi -lxenctrl -lxenlight -lglib-2.0
 LIBS = -lvmi -lxenctrl -lxenlight -lglib-2.0 -lzmq -pthread
@@ -17,6 +18,8 @@ LIBS = -lvmi -lxenctrl -lxenlight -lglib-2.0 -lzmq -pthread
 else
 
 # x86_64 definitions
+CFLAGS += -DX86_64
+
 INC = $(shell pkg-config --cflags glib-2.0)
 LIBS = -lvmi -lxenctrl -lxenlight $(shell pkg-config --libs glib-2.0) -lzmq -lpthread
 

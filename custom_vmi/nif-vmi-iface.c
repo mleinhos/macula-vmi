@@ -18,20 +18,22 @@
 #include <stdio.h>
 #include <inttypes.h>
 #include <signal.h>
-#include <glib.h>
-////#include "nvmi.h"
-#include <assert.h>
+#include <setjmp.h>
+
 #include <libvmi/libvmi.h>
 #include <libvmi/events.h>
 #include <libxl_utils.h>
 #include <libxl.h>
-#include <setjmp.h>
+
 #include <xenctrl.h>
 #include <libvmi/slat.h>
+
 #include <xenevtchn.h>
 #include <xen/vm_event.h>
 #include <xenctrl_compat.h>
 
+#include <glib.h>
+#include <assert.h>
 
 typedef uint16_t p2m_view_t;
 #define ALTP2M_INVALID_VIEW (p2m_view_t)(~0)
@@ -153,7 +155,7 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 	addr_t shadow = 0;
 
 	if (event->slat_id == 0) { //sw single step
-		event->slat_id = sm1_view;
+		event->slat_id = alt_view1;
 
 		// TODO: track post CBs on a per-vcpu basis and call appropriate one
 
@@ -194,7 +196,7 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 	vcpu_hook_nodes [event->vcpu_id] = hook_node;
 exit:
 
-	if (event->slat_id == sm1_view) {
+	if (event->slat_id == alt_view1) {
 		event-> slat_id = 0;
 	}
 
@@ -692,7 +694,7 @@ nif_event_loop (void)
 	vmi_event_t trap_event, mem_event, cr3_event;
 
 #if defined(ARM64)
-	SETUP_PRIVCALL_EVENT(&trap_event, hook_cb);
+	SETUP_PRIVCALL_EVENT(&trap_event, _internal_hook_cb);
 	trap_event.data = &xa;
 	if (VMI_SUCCESS != vmi_register_event(xa.vmi, &trap_event)) {
 		fprintf(stderr,"\nUnable to register privcall event");
