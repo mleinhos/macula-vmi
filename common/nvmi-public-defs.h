@@ -17,12 +17,11 @@
 #define nvmi_iface_t
 
 // General defs
+#define PROCESS_MAX_COMM_NAME 32 // max len of comm field in task_struct
 #define PROCESS_MAX_PATH 128
 #define SYSCALL_MAX_ARGS 6
 
-
 #define NVMI_STRUCT_ATTRIBS __attribute__((packed))
-
 
 
 typedef uint16_t length_t;
@@ -71,7 +70,8 @@ typedef struct _process_creation_event {
     uint64_t uid;
     uint64_t gid;
     uint64_t pid;
-    char path[PROCESS_MAX_PATH];
+    char     comm[PROCESS_MAX_COMM_NAME];
+    char     path[PROCESS_MAX_PATH];
 } NVMI_STRUCT_ATTRIBS process_creation_event_t;
 
 

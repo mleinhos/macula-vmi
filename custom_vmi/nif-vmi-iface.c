@@ -108,19 +108,36 @@ static nif_xen_monitor xa;
 static inline status_t
 write_trap_val_va (vmi_instance_t vmi, addr_t va, trap_val_t val)
 {
-	return vmi_write_va (vmi, va, 0, sizeof(trap_val_t), &val, NULL);
+#if defined(ARM64)
+	return vmi_write_32_va (vmi, va, 0, &val);
+	//return vmi_write_va (vmi, va, 0, sizeof(trap_val_t), &val, NULL);
+#else
+	return vmi_write_8_va (vmi, va, 0, &val);
+#endif
 }
 
 static inline status_t
 write_trap_val_pa (vmi_instance_t vmi, addr_t pa, trap_val_t val)
 {
-	return vmi_write_pa (vmi, pa, sizeof(trap_val_t), &val, NULL);
+//	return vmi_write_pa (vmi, pa, sizeof(trap_val_t), &val, NULL);
+#if defined(ARM64)
+	return vmi_write_32_pa (vmi, pa, &val);
+#else
+	return vmi_write_8_pa (vmi, pa, &val);
+#endif
+
 }
 
 static inline status_t
 read_trap_val_va (vmi_instance_t vmi, addr_t va, trap_val_t* val)
 {
-	return vmi_read_va (vmi, va, 0, sizeof(trap_val_t), val, NULL);
+//	return vmi_read_va (vmi, va, 0, sizeof(trap_val_t), val, NULL);
+#if defined(ARM64)
+	return vmi_read_32_va (vmi, va, 0, val);
+	//return vmi_write_va (vmi, va, 0, sizeof(trap_val_t), &val, NULL);
+#else
+	return vmi_read_8_va (vmi, va, 0, val);
+#endif
 }
 
 
@@ -140,6 +157,7 @@ free_pg_hks_lst (gpointer data)
 	g_free(hook_node);
 }
 
+
 #if defined(ARM64)
 
 /**
@@ -154,37 +172,37 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 	nif_hook_node* hook_node = NULL;
 	addr_t shadow = 0;
 
-	if (event->slat_id == 0) { //sw single step
+	fprintf (stderr, "%s:%d\n", __FUNCTION__, __LINE__);
+	if (event->slat_id == 0) { // SW SINGLE STEP
 		event->slat_id = alt_view1;
-
+		fprintf (stderr, "%s:%d\n", __FUNCTION__, __LINE__);
 		// TODO: track post CBs on a per-vcpu basis and call appropriate one
-
 		return (VMI_EVENT_RESPONSE_VMM_PAGETABLE_ID);
 	}
 
 	// lookup the gfn -- do we know about it?
 
 	shadow = (addr_t) GPOINTER_TO_SIZE(
-	                 g_hash_table_lookup(xa.pframe_sframe_mappings,
-	                                     GSIZE_TO_POINTER(event->privcall_event.gfn)));
+		g_hash_table_lookup(xa.pframe_sframe_mappings,
+				    GSIZE_TO_POINTER(event->privcall_event.gfn)));
 	if (0 == shadow) {
-		event->interrupt_event.reinject = INTERRUPT_REINJECT_VAL;
+		fprintf (stderr, "%s:%d\n", __FUNCTION__, __LINE__);
+		// No need to reinject since smc is not available to guest
 		return VMI_EVENT_RESPONSE_NONE;
 	}
 
-	pgnode_temp = g_hash_table_lookup(xa.shadow_pnode_mappings,
-	                                  GSIZE_TO_POINTER(shadow));
+	pgnode_temp = g_hash_table_lookup (xa.shadow_pnode_mappings,
+					   GSIZE_TO_POINTER(shadow));
 	if (NULL == pgnode_temp) {
 		fprintf(stderr, "Can't find pg_node for shadow: %" PRIx64 "\n", shadow);
 		return VMI_EVENT_RESPONSE_NONE;
 	}
 
-	hook_node = g_hash_table_lookup(pgnode_temp->offset_bp_mappings,
-	                                GSIZE_TO_POINTER(event->privcall_event.offset));
+	hook_node = g_hash_table_lookup (pgnode_temp->offset_bp_mappings,
+					 GSIZE_TO_POINTER(event->privcall_event.offset));
 	if (NULL == pgnode_temp) {
-		fprintf(stderr,"\nhook_cb Warning: No BP record found for this offset %" PRIx64 " on page %" PRIx16 "",
-		        event->privcall_event.offset, event->privcall_event.gfn);
-		event->interrupt_event.reinject = INTERRUPT_REINJECT_VAL;
+		fprintf (stderr, "Warning: No BP record found for this offset %" PRIx64 " on page %" PRIx16 "",
+			 event->privcall_event.offset, event->privcall_event.gfn);
 		return VMI_EVENT_RESPONSE_NONE;
 	}
 
@@ -193,12 +211,13 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 		hook_node->pre_cb (vmi, event, hook_node->cb_arg);
 	}
 
-	vcpu_hook_nodes [event->vcpu_id] = hook_node;
-exit:
+	//vcpu_hook_nodes [event->vcpu_id] = hook_node;
 
+//exit:
 	if (event->slat_id == alt_view1) {
-		event-> slat_id = 0;
+		event->slat_id = 0;
 	}
+	fprintf (stderr, "%s:%d\n", __FUNCTION__, __LINE__);
 
 	return (VMI_EVENT_RESPONSE_VMM_PAGETABLE_ID);
 }
@@ -290,40 +309,51 @@ nif_enable_monitor (addr_t kva,
 	int rc = 0;
 	size_t ret;
 	status_t status;
-	nif_page_node*  pgnode_new  = NULL;
+	nif_page_node*  pgnode  = NULL;
 	nif_hook_node* hook_node = NULL;
 	addr_t pa, frame;
 	addr_t shadow, shadow_frame, shadow_offset;
 	uint8_t buff[DOM_PAGE_SIZE] = {0};
 	addr_t dtb = 0;
-
-	if (VMI_FAILURE == vmi_pid_to_dtb (xa.vmi, 0, &dtb)) {
-		rc = EINVAL;
-		assert (!"vmi_pid_to_dtb()");
-		fprintf(stderr,"Shadow: Couldn't get dtb\n");
+	trap_val_t orig1 = 0;
+	trap_val_t orig2 = 0;
+	
+	// Read orig values
+	status  = read_trap_val_va (xa.vmi, kva, &orig1);
+#if defined(ARM64)
+	status |=  read_trap_val_va (xa.vmi, kva+4, &orig2);
+#endif
+	if (VMI_SUCCESS != status) {
+		rc = EACCES;
+		fprintf (stderr, "Failed to read orig val near %" PRIx64 "\n", kva);
 		goto done;
 	}
 
+	// TODO: remove dtb, pa stuff from here. We're only using kernel addresses at this stage.
+	if (VMI_FAILURE == vmi_pid_to_dtb (xa.vmi, 0, &dtb)) {
+		rc = EINVAL;
+		fprintf(stderr,"Shadow: Couldn't get dtb\n");
+		goto done;
+	}
+	// vmi_translate_kv2p (xa.vmi, kva, &pa);
 	if (VMI_SUCCESS != vmi_pagetable_lookup (xa.vmi,dtb, kva, &pa)) {
 		rc = EINVAL;
-		assert (!"vmi_pagetable_lookup()");
 		fprintf(stderr,"Shadow: Couldn't get pagetable information\n");
 		goto done;
 	}
 
 	frame = pa >> PG_OFFSET_BITS;
-
 	shadow_offset = pa % DOM_PAGE_SIZE;
+	
 	shadow_frame = (addr_t) GPOINTER_TO_SIZE (g_hash_table_lookup(xa.pframe_sframe_mappings,
 	                                    GSIZE_TO_POINTER(frame)));
 
-	// Allocate frame if not already there
 	if (0 == shadow_frame) {
+		// Allocate frame if not already there
 		shadow_frame = ++(xa.max_gpfn);
 
 		if (xc_domain_populate_physmap_exact(xa.xci, xa.domain_id, 1, 0,0, (xen_pfn_t*)&shadow_frame) < 0) {
 			rc = ENOMEM;
-			assert (!"xc_domain_populate_physmap_exact()");
 			fprintf(stderr,"Failed to allocate frame at %" PRIx64 "\n", shadow_frame);
 			goto done;
 		}
@@ -332,25 +362,28 @@ nif_enable_monitor (addr_t kva,
 		                     GSIZE_TO_POINTER(frame),
 		                     GSIZE_TO_POINTER(shadow_frame));
 
-		// Update p2m mapping
+		// Update p2m mapping: alt_view1: frame --> shadow_frame
 		if (0 != xc_altp2m_change_gfn(xa.xci, xa.domain_id, alt_view1, frame, shadow_frame)) {
 			rc = EACCES;
-			assert (!"xc_altp2m_change_gfn()");
 			fprintf(stderr,"Shadow: Unable to change mapping for alt_view1\n");
 			goto done;
 		}
 	}
 
-	pgnode_new = g_hash_table_lookup(xa.shadow_pnode_mappings, GSIZE_TO_POINTER(shadow_frame));
-	if (NULL == pgnode_new) {
+	// shadow_frame is now known
+	shadow = (shadow_frame << PG_OFFSET_BITS) + shadow_offset;
+	fprintf (stderr, "shadow %lx shadow_frame %lx for va %lx\n",
+		 shadow, shadow_frame, kva);
+
+	pgnode = g_hash_table_lookup(xa.shadow_pnode_mappings, GSIZE_TO_POINTER(shadow_frame));
+	if (NULL == pgnode) {
 		status = vmi_read_pa(xa.vmi,
 		                     frame << PG_OFFSET_BITS,
 		                     DOM_PAGE_SIZE,
 		                     buff,
 		                     &ret);
-		if (DOM_PAGE_SIZE!= ret || status == VMI_FAILURE) {
+		if (DOM_PAGE_SIZE != ret || status == VMI_FAILURE) {
 			rc = EACCES;
-			assert (!"vmi_read_pa()");
 			fprintf(stderr,"Shadow: Failed to read syscall page\n");
 			goto done;
 		}
@@ -360,95 +393,64 @@ nif_enable_monitor (addr_t kva,
 		                      DOM_PAGE_SIZE,
 		                      buff,
 		                      &ret);
-		if (DOM_PAGE_SIZE!= ret || status == VMI_FAILURE) {
+		if (DOM_PAGE_SIZE != ret || status == VMI_FAILURE) {
 			rc = EACCES;
-			assert (!"vmi_write_pa()");
 			fprintf(stderr,"Shadow: Failed to write to shadow page\n");
 			goto done;
 		}
 
 		// Update the hks list
-		pgnode_new               = g_new0(nif_page_node, 1);
-		pgnode_new->shadow_frame = shadow_frame;
-		pgnode_new->frame        = frame;
-		pgnode_new->offset_bp_mappings = g_hash_table_new_full(NULL, NULL,NULL,free_pg_hks_lst);
+		pgnode               = g_new0(nif_page_node, 1);
+		pgnode->shadow_frame = shadow_frame;
+		pgnode->frame        = frame;
+		pgnode->offset_bp_mappings = g_hash_table_new_full(NULL, NULL,NULL,free_pg_hks_lst);
 
-		g_hash_table_insert(xa.shadow_pnode_mappings,
-		                    GSIZE_TO_POINTER(shadow_frame),
-		                    pgnode_new);
-#if 0
-		// Activate monitoring for this page.
-		status = vmi_set_mem_event(xa.vmi,
-		                           shadow_frame,
-		                           VMI_MEMACCESS_RW,
-		                           alt_view1);
-		if (VMI_SUCCESS != status) {
-			rc = EACCES;
-			assert (!"vmi_set_mem_event()");
-			fprintf(stderr,"Shadow: Couldn't set frame permissions for %" PRIx64 "\n", shadow_frame);
-			goto done;
-		}
-		//fprintf(stderr,"\nInside: Monitoring on shadow page activated");
-#endif
+		g_hash_table_insert (xa.shadow_pnode_mappings,
+				     GSIZE_TO_POINTER(shadow_frame),
+				     pgnode);
 	} else {
 		// Check for existing hooks: if one exists, we're done
-		hook_node = g_hash_table_lookup(pgnode_new->offset_bp_mappings,
+		hook_node = g_hash_table_lookup(pgnode->offset_bp_mappings,
 		                             GSIZE_TO_POINTER(shadow_offset));
 		if (NULL != hook_node) {
-			// not an error -- we're done
+			fprintf (stderr, "Found hook already in place for va %" PRIx64 "\n", kva);
 			goto done;
 		}
-	}
-
-	hook_node = g_new0(nif_hook_node, 1);
-	shadow = (shadow_frame << PG_OFFSET_BITS) + shadow_offset;
-
-	// TODO: experiment with the second callback: can we change it
-	// to be notified on an access to schedule() / __schedule()
-	// rather than the very next instruction?
-
-	// Read and write the first value unconditionally
-	if (VMI_FAILURE == read_trap_val_va (xa.vmi, kva, &hook_node->backup_val1)) {
-		rc = EACCES;
-		printf ("Failed to read orig val at %" PRIx64 "\n", kva);
-		goto done;
-	}
-
-	if (VMI_FAILURE == write_trap_val_pa (xa.vmi, shadow, trap)) {
-		rc = EACCES;
-		printf ("Failed to write trap val at %" PRIx64 "\n", pa);
-		goto done;
 	}
 
 	// TODO: experiment with the second callback: can we change it
 	// to be notified on an access to schedule() / __schedule()
 	// rather than the very next instruction? This applies to
-	// Intel too -- is a second #VE faster than single stepping?
+	// Intel too -- is a second #BPE faster than single stepping?
 
-	// In the case of ARM, read/write the second value too
+	// Write the trap/smc value(s): The first goes in the shadow
+	// page, the second (ARM only) goes in the orig page.
+	fprintf (stderr, "Writing trap %x to PA (ARM: and PA+4) %" PRIx64 ", backup1=%x\n",
+		 trap, shadow, orig1);
+
+	status  = write_trap_val_pa (xa.vmi, shadow, trap);
 #if defined(ARM64)
-	if (VMI_FAILURE == read_trap_val_va (xa.vmi, kva+4, &hook_node->backup_val2)) {
-		rc = EACCES;
-		printf ("Failed to read orig val at %" PRIx64 "\n", kva+4);
-		goto done;
-	}
-
-	if (VMI_FAILURE == write_trap_val_pa (xa.vmi, shadow + 4, trap)) {
-		rc = EACCES;
-		printf ("Failed to write trap val at %" PRIx64 "\n", pa + 4);
-		goto done;
-	}
+	//status |= write_trap_val_pa (xa.vmi, shadow + 4, trap);
+	status |= write_trap_val_pa (xa.vmi, (frame << PG_OFFSET_BITS) + shadow_offset + 4, trap);
 #endif
+	if (VMI_SUCCESS != status) {
+		rc = EACCES;
+		fprintf (stderr, "Failed to write trap val at %" PRIx64 "\n", shadow);
+		goto done;
+	}
 
+	// Create new hook node and save it
+	hook_node = g_new0(nif_hook_node, 1);
 	strncpy(hook_node->name, name, MAX_SNAME_LEN);
-	hook_node->parent     = pgnode_new;
+	hook_node->parent     = pgnode;
 	hook_node->offset     = shadow_offset;
-
 	hook_node->pre_cb     = pre_cb;
 	hook_node->post_cb    = post_cb;
 	hook_node->cb_arg     = cb_arg;
+	hook_node->backup_val1 = orig1;
+	hook_node->backup_val1 = orig2;
 
-	g_hash_table_insert(pgnode_new->offset_bp_mappings,
+	g_hash_table_insert(pgnode->offset_bp_mappings,
 	                    GSIZE_TO_POINTER(shadow_offset),
 	                    hook_node);
 
@@ -474,28 +476,33 @@ static int
 setup_ss_events (vmi_instance_t vmi)
 {
 	int vcpus = vmi_get_num_vcpus(vmi);
-	fprintf(stderr,"\nDomain vcpus=%d", vcpus);
+	int rc = 0;
+
+	fprintf(stderr, "Domain vcpus=%d\n", vcpus);
 
 	if (0 == vcpus) {
+		rc = EIO;
 		fprintf(stderr,"Failed to find the total VCPUs\n");
-		return -1;
+		goto exit;
 	}
 
 	if (vcpus > MAX_VCPUS) {
+		rc = EINVAL;
 		fprintf(stderr,"Guest VCPUS are greater than what we can support\n");
-		return -1;
+			goto exit;
 	}
 
 	for (int i = 0; i < vcpus; i++) {
 		SETUP_SINGLESTEP_EVENT(&ss_event[i], 1u << i, singlestep_cb,0);
 
 		if (VMI_SUCCESS != vmi_register_event(vmi, &ss_event[i])) {
+			rc = EIO;
 			fprintf(stderr,"Failed to register SS event on VCPU failed %d\n", i);
-			return -1;
+			goto exit;
 		}
 	}
-
-	return 1;
+exit:
+	return rc;
 }
 #endif
 
@@ -556,25 +563,30 @@ static void destroy_views(uint32_t domain_id)
 		fprintf(stderr,"Failed to disable alternate view for domain_id: %u\n",domain_id);
 }
 
-static int inst_xen_monitor(const char* name)
+static int
+inst_xen_monitor(const char* name)
 {
+	int rc = 0;
 	if (0 == (xa.xci = xc_interface_open(NULL, NULL, 0))) {
 		fprintf(stderr,"Failed to open xen interface\n");
-		return -1; // nothing to clean
+		return EIO; // nothing to clean
 	}
 
 	if (libxl_ctx_alloc(&xa.xcx, LIBXL_VERSION, 0, NULL)) {
+		rc = ENOMEM;
 		fprintf(stderr,"Unable to create xl context\n");
 		goto clean;
 	}
 
 
 	if ( libxl_name_to_domid(xa.xcx, name, &xa.domain_id)) {
+		rc = EINVAL;
 		fprintf(stderr,"Unable to get domain id for %s\n", name);
 		goto clean;
 	}
 
 	if (0 == (xa.orig_mem_size = vmi_get_memsize(xa.vmi))) {
+		rc = EIO;
 		fprintf(stderr,"Failed to get domain memory size\n");
 		goto clean;
 	}
@@ -582,16 +594,17 @@ static int inst_xen_monitor(const char* name)
 
 
 	if (xc_domain_maximum_gpfn(xa.xci, xa.domain_id, &xa.max_gpfn) < 0) {
+		rc = EIO;
 		fprintf(stderr,"Failed to get max gpfn for the domain\n");
 		goto clean;
 	}
 
 	//fprintf(stderr,"\nMax gfn:%" PRIx64 "",xa.max_gpfn);
-	return 1;
+	return 0;
 
 clean:
 	clean_xen_monitor();
-	return -1;
+	return rc;
 }
 
 void
@@ -612,23 +625,26 @@ nif_fini(void)
 	vmi_destroy(xa.vmi);
 }
 
-// FIXME: return errno
 int
 nif_init(const char* name)
 {
 	vmi_event_t trap_event, mem_event, cr3_event;
 	status_t status;
+	int rc = 0;
 
 	// Initialize the libvmi library.
 	if (VMI_FAILURE ==
 	    vmi_init_complete(&xa.vmi, (void*)name, VMI_INIT_DOMAINNAME| VMI_INIT_EVENTS,NULL,
 	                      VMI_CONFIG_GLOBAL_FILE_ENTRY, NULL, NULL)) {
+		rc = EIO;
 		fprintf(stderr,"Failed to init LibVMI library.\n");
-		goto graceful_exit;
+		goto exit;
 	}
 
-	if (-1 == inst_xen_monitor(name))
-		return -1;
+	rc = inst_xen_monitor(name);
+	if (rc) {
+		goto exit;
+	}
 
 	fprintf(stderr,"\n\t\t\tNumen Introspection Framework v2.0\n\n");
 
@@ -638,37 +654,41 @@ nif_init(const char* name)
 	vmi_pause_vm(xa.vmi);
 
 	if (0!= xc_altp2m_set_domain_state(xa.xci, xa.domain_id, 1)) {
+		rc = EIO;
 		fprintf(stderr,"Failed to enable altp2m for domain_id: %u\n", xa.domain_id);
-		goto graceful_exit;
+		goto exit;
 	}
 
 	if (0!= xc_altp2m_create_view(xa.xci, xa.domain_id, 0, &alt_view1)) {
+		rc = EIO;
 		fprintf(stderr,"Failed to create execute view\n");
-		goto graceful_exit;
+		goto exit;
 	}
 
 
 	if (0!= xc_altp2m_switch_to_view(xa.xci, xa.domain_id, alt_view1)) {
+		rc = EIO;
 		fprintf(stderr,"Failed to switch to execute view id:%u\n", alt_view1);
-		goto graceful_exit;
+		goto exit;
 	}
 
 	fprintf(stderr, "Altp2m: alt_view1 created and activated\n");
 
-#if !defined(ARM64)
+#if 0 && !defined(ARM64)
 	//Setup a generic mem_access event.
 	SETUP_MEM_EVENT(&mem_event,0,
 	                VMI_MEMACCESS_RWX,
 	                mem_intchk_cb,1);
 
 	if (VMI_SUCCESS !=vmi_register_event(xa.vmi, &mem_event)) {
+		rc = EIO;
 		fprintf(stderr,"Failed to setup memory event\n");
-		goto graceful_exit;
+		goto exit;
 	}
 #endif
 
-graceful_exit:
-	return status;
+exit:
+	return rc;
 }
 
 
@@ -690,7 +710,6 @@ int
 nif_event_loop (void)
 {
 	int rc = 0;
-
 	vmi_event_t trap_event, mem_event, cr3_event;
 
 #if defined(ARM64)
@@ -700,10 +719,11 @@ nif_event_loop (void)
 		fprintf(stderr,"\nUnable to register privcall event");
 		goto exit;
 	}
-
 #else
-	if (-1 == setup_ss_events(xa.vmi))
+	rc = setup_ss_events(xa.vmi);
+	if (rc) {
 		goto exit;
+	}
 
 	SETUP_INTERRUPT_EVENT(&trap_event, 0, _internal_hook_cb);
 	trap_event.data = &xa;

@@ -3,8 +3,10 @@ _arch = $(shell uname -m)
 
 CC = gcc
 
-#CFLAGS = -O3
-CFLAGS = -O0 -ggdb
+CFLAGS = -I../common -I.
+
+#CFLAGS += -O3 -g
+CFLAGS += -O0 -ggdb
 
 TARGET = NInspector
 

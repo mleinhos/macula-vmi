@@ -270,7 +270,6 @@ setup_spg_bp (nif_xen_monitor* xa, addr_t va, const char* name, uint32_t backup_
             goto done;
         }
 
-
         // Update the hks list
         pgnode_new              = g_new0(nif_page_node, 1);
         pgnode_new->shadow_frame = shadow;

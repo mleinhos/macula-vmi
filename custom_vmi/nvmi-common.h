@@ -11,8 +11,7 @@
 
 
 #define NVMI_MAX_SYSCALL_ARG_CT 6
-
-
+#define NVMI_MAX_SYSCALL_CT 450
 
 
 #ifndef NUMBER_OF

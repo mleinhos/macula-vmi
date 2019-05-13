@@ -9,11 +9,13 @@
 #ifndef NVMI_INTERNAL_DEFS_H
 #define NVMI_INTERNAL_DEFS_H
 
+#define NVMI_MAX_ARG_MEM 512
+
 #include <glib.h>
 #include <libvmi/libvmi.h>
+#include "nvmi-public-defs.h"
 #include "nvmi-common.h"
 
-#define NVMI_MAX_TASK_NAME_LEN 32
 
 /**
  * This is the maximal set of registers we need to capture upon an event.
@@ -66,17 +68,33 @@ static int nvmi_syscall_arg_regs[] = { RDI, RSI, RDX, R10, R8, R9 };
 typedef struct _nvmi_task_info {
 	addr_t p_task_struct; // addr of task_struct
 	addr_t kstack; // base of kernel stack
-	vmi_pid_t pid;
-	vmi_pid_t ppid;
-	// how many live events reference this task info?
+	reg_t key; // the key used to put this into hash table
 	unsigned long refct;
-	char comm [NVMI_MAX_TASK_NAME_LEN];
+
+	// How many live events reference this task info? Destroyed when 0.
+	process_creation_event_t einfo;
+//	vmi_pid_t pid;
+//	vmi_pid_t ppid;
+//	char comm [PROCESS_MAX_COMM_NAME];
+
+	// TODO: get full path to binary via task->mm->??, since it's a file-backed mmap()
+	
 } nvmi_task_info_t;
 
-
-typedef struct _nvmi_event_context {
+// TODO: exapnd for other event types
+typedef struct _nvmi_event {
 	nvmi_registers_t r;
+	nvmi_syscall_def_t * sc;
 	nvmi_task_info_t * task;
-} nvmi_event_context_t;
+
+	// If we must collect process memory during the first callback...
+
+	// ... track its offsets into "mem" field here
+	int mem_ofs[NVMI_MAX_SYSCALL_ARG_CT];
+	int arg_lens[NVMI_MAX_SYSCALL_ARG_CT];
+	
+	// ...and put it here
+	uint8_t mem[NVMI_MAX_ARG_MEM];
+} nvmi_event_t;
 
 #endif // NVMI_INTERNAL_DEFS_H
