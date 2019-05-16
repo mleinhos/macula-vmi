@@ -212,12 +212,12 @@ pre_gather_registers (vmi_instance_t vmi,
 	status |= vmi_get_vcpureg (vmi, &regs->arch.arm64.ttbr1, TTBR1, event->vcpu_id);
 	status |= vmi_get_vcpureg (vmi, &regs->arch.arm64.sp,   SP_USR, event->vcpu_id);
 	status |= vmi_get_vcpureg (vmi, &regs->arch.arm64.sp_el0, SP_EL0, event->vcpu_id);
-
+	/*
 	fprintf (stderr, "context: ttbr0   = %lx\n", regs->arch.arm64.ttbr0);
 	fprintf (stderr, "context: ttbr1   = %lx\n", regs->arch.arm64.ttbr1);
 	fprintf (stderr, "context: sp_el0  = %lx\n", regs->arch.arm64.sp_el0);
 	fprintf (stderr, "context: sp      = %lx\n", regs->arch.arm64.sp);
-
+	*/
 #else
 	status  = vmi_get_vcpureg (vmi, &regs->arch.intel.cr3, CR3,     event->vcpu_id);
 	status |= vmi_get_vcpureg (vmi, &regs->arch.intel.sp,  RSP,     event->vcpu_id);
@@ -258,7 +258,7 @@ get_current_task (vmi_instance_t vmi,
 	
 #if defined(ARM64)
 	// Fast: get current task_struct *
-	*key = regs->arch.arm64.sp_el0;
+	*task = regs->arch.arm64.sp_el0;
 #else
 	// x86: slow
 	// key = regs->arch.intel.sp & NVMI_KSTACK_MASK;
@@ -458,7 +458,7 @@ read_memory (vmi_instance_t vmi,
 #else
 	// FIXME: fix user mem deref on ARM
 	// TODO: clear out v2p cache prior to translation
-	str = strdup("[ARM: unknown value (FIXME)]")
+	str = strdup("<string value>");
 #endif
 	
 exit:
@@ -594,7 +594,7 @@ exit:
 }
 
 static int
-handle_syscall (const char *name, addr_t kva)
+handle_syscall (char *name, addr_t kva)
 {
 	int rc = 0;
 	nvmi_cb_info_t * cbi = NULL;
@@ -611,9 +611,12 @@ handle_syscall (const char *name, addr_t kva)
 		}
 	}
 
-	if (strncmp (name, "sys_", 4) &&
-	    strncmp (name, "sys_", 4) &&
-	    strncmp (name, "sys_", 4) )
+	// SyS --> sys
+	for (int i = 0; i < 3; ++i) {
+		name[i] = (char) tolower(name[i]);
+	}
+	
+	if (strncmp (name, "sys_", 4))
 	{
 		// mismatch
 		rc = ENOENT;
@@ -699,7 +702,6 @@ set_instrumentation_points (const char* mappath)
 		goto exit;
 	}
 
-	
 	while (fgets( one_line, sizeof(one_line), input_file) != NULL) {
 		char * name = NULL;
 		addr_t kva = 0;
@@ -956,7 +958,7 @@ nvmi_main_init (void)
 	
 	status |= vmi_get_offset (vmi, "linux_name", &gstate.task_name_ofs);
 	status |= vmi_get_offset (vmi, "linux_pid",  &gstate.task_pid_ofs);
-//	status |= vmi_get_offset (vmi, "linux_ppid",  &gstate.task_ppid_ofs);
+	//status |= vmi_get_offset (vmi, "linux_ppid",  &gstate.task_ppid_ofs);
 	
 	if (VMI_FAILURE == status) {
 		fprintf (stderr, "Failed to get offset\n");
