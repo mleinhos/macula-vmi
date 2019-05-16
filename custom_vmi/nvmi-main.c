@@ -10,6 +10,8 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
+
 #include <errno.h>
 #include <sys/mman.h>
 #include <stdio.h>
@@ -35,7 +37,7 @@
 #include <zmq.h>
 
 #include "nif-vmi-iface.h"
-#include "nvmi-syscall-defs.h"
+#include "nvmi-event-templates.h"
 #include "process_kill_helper.h"
 #include "nvmi-internal-defs.h"
 
@@ -123,67 +125,6 @@ close_handler(int sig)
 	gstate.interrupted = true;
 	nif_stop();
 }
-
-/*
-// Kills the current domU process by corrupting its state upon a
-// syscall. May need further work.
-//
-// Reference linux kernel:
-// arch/x86/entry/entry_64.S
-// arch/arm64/kernel/entry.S
-
-static void
-linux_kill_curr_proc (vmi_instance_t vmi, vmi_event_t* event)
-{
-	// We're at the entry of a syscall.
-	uint64_t stack[6] = {0};
-	uint64_t sp_val = 0;
-	status_t status = VMI_SUCCESS;
-	size_t bytes_read = 0;
-	static int call_ct = 0;
-
-#ifdef ARM64
-	// We may need to clobber X0 ... X5 for the ARM case
-	reg_t regsp = SP_USR;
-#else
-	reg_t regsp = RSP;
-#endif
-
-//#ifdef ARM64
-	status = vmi_set_vcpureg(vmi, 0, X0, event->vcpu_id);
-	if (VMI_FAILURE == status) {
-		fprintf(stderr, "Failed to write X0 register\n");
-		goto exit;
-	}
-	status = vmi_set_vcpureg(vmi, 0, X1, event->vcpu_id);
-	if (VMI_FAILURE == status) {
-		fprintf(stderr, "Failed to write X1 register\n");
-		goto exit;
-	}
-	status = vmi_set_vcpureg(vmi, 0, X2, event->vcpu_id);
-	if (VMI_FAILURE == status) {
-		fprintf(stderr, "Failed to write X2 register\n");
-		goto exit;
-	}
-	status = vmi_set_vcpureg(vmi, 0, X3, event->vcpu_id);
-	if (VMI_FAILURE == status) {
-		fprintf(stderr, "Failed to write X3 register\n");
-		goto exit;
-	}
-	status = vmi_set_vcpureg(vmi, 0, X4, event->vcpu_id);
-	if (VMI_FAILURE == status) {
-		fprintf(stderr, "Failed to write X4 register\n");
-		goto exit;
-	}
-//#endif
-
-exit:
-	++call_ct;
-	if (100 == call_ct) {
-		gstate.killpid = KILL_PID_NONE;
-	}
-}
-*/
 
 
 static int
@@ -551,6 +492,30 @@ pre_instr_cb (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 		}
 	}
 
+	if (evt->task->einfo.pid == gstate.killpid &&
+	    cbi->cb_type == NVMI_CALLBACK_SYSCALL &&
+	    cbi->argct > 0                         )
+	{
+		// Kills the current domU process by corrupting its
+		// state upon a syscall. May need further work.
+		//
+		// Reference linux kernel:
+		// arch/x86/entry/entry_64.S
+		// arch/arm64/kernel/entry.S
+		
+		// Clobber the pointer (void *) registers
+		for (int i = 0; i < cbi->argct; ++i)
+		{
+			if (cbi->args[i].type != NVMI_ARG_TYPE_PVOID) { continue; }
+
+			status = vmi_set_vcpureg (vmi, 0, nvmi_syscall_arg_regs[i], event->vcpu_id);
+			if (VMI_FAILURE == status) {
+				fprintf(stderr, "Failed to write syscall register #%d\n", i);
+				break;
+			}
+		}
+	}
+
 	// The event owns a reference
 	atomic_inc (&evt->task->refct);
 	g_async_queue_push (gstate.event_queue, (gpointer) evt);
@@ -598,6 +563,7 @@ handle_syscall (char *name, addr_t kva)
 {
 	int rc = 0;
 	nvmi_cb_info_t * cbi = NULL;
+	bool monitored = false;
 
 	static bool prediscovery = false;
 	static size_t nvmi_syscall_new = 0; // where to put new (incomplete) entries into table?
@@ -641,6 +607,19 @@ handle_syscall (char *name, addr_t kva)
 	//
 	// We have a syscall
 	//
+
+
+	// Bail if we're already monitoring that point
+	rc = nif_is_monitored (kva, &monitored);
+	if (rc) {
+		goto exit;
+	}
+
+	if (monitored) {
+		fprintf (stderr, "KVA %" PRIx64 " is alraedy monitored\n", kva);
+		goto exit;
+	}
+	
 	gstate.act_calls++;
 	if (gstate.act_calls == NVMI_MAX_SYSCALL_CT-1) { // max syscalls that we want to monitor
 		rc = ENOSPC;
@@ -770,6 +749,11 @@ handle_special_event (nvmi_event_t * evt)
 		fprintf (stderr, "exit of process pid %ld proc %s\n",
 			 evt->task->einfo.pid, evt->task->einfo.comm);
 
+		if (evt->task->einfo.pid == gstate.killpid) {
+			fprintf (stderr, "Kill of process pid=%d succeeded\n", gstate.killpid);
+			gstate.killpid = KILL_PID_NONE;
+		}
+		
 		// we'll never see that again....
 		g_hash_table_remove (gstate.context_lookup, (gpointer) evt->task->key);
 	}

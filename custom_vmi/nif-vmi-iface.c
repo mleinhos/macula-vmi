@@ -149,11 +149,11 @@ free_pg_hks_lst (gpointer data)
 
 	(void) write_trap_val_pa (xa.vmi,
 				  MKADDR(hook_node->parent->shadow_frame, hook_node->offset),
-	                          hook_node->backup_val1);
+				  hook_node->backup_val1);
 #if defined(ARM64)
 	(void) write_trap_val_pa (xa.vmi,
-	                          MKADDR(hook_node->parent->shadow_frame, hook_node->offset) + 4,
-	                          hook_node->backup_val2);
+				  MKADDR(hook_node->parent->shadow_frame, hook_node->offset) + 4,
+				  hook_node->backup_val2);
 #endif
 	g_free(hook_node);
 }
@@ -234,8 +234,8 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 
 	// lookup the gfn -- do we know about it?
 	shadow = (addr_t) GPOINTER_TO_SIZE(
-	                 g_hash_table_lookup(xa.pframe_sframe_mappings,
-	                                     GSIZE_TO_POINTER(event->interrupt_event.gfn)));
+		g_hash_table_lookup(xa.pframe_sframe_mappings,
+				    GSIZE_TO_POINTER(event->interrupt_event.gfn)));
 
 	if (0 == shadow) {
 		event->interrupt_event.reinject = INTERRUPT_REINJECT_VAL;
@@ -243,14 +243,14 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 	}
 
 	pgnode_temp = g_hash_table_lookup(xa.shadow_pnode_mappings,
-	                                  GSIZE_TO_POINTER(shadow));
+					  GSIZE_TO_POINTER(shadow));
 	if (NULL == pgnode_temp) {
 		fprintf(stderr, "Can't find pg_node for shadow: %" PRIx64 "\n", shadow);
 		return VMI_EVENT_RESPONSE_NONE;
 	}
 
 	hook_node = g_hash_table_lookup(pgnode_temp->offset_bp_mappings,
-	                                GSIZE_TO_POINTER(event->interrupt_event.offset));
+					GSIZE_TO_POINTER(event->interrupt_event.offset));
 	if (NULL == hook_node) {
 		fprintf(stderr, "No hook record found for this offset %" PRIx64 " on page %" PRIx64 "\n",
 			event->interrupt_event.offset, event->interrupt_event.gfn);
@@ -269,7 +269,7 @@ exit:
 	event->interrupt_event.reinject = 0;
 	event-> slat_id = 0;
 	return (VMI_EVENT_RESPONSE_TOGGLE_SINGLESTEP|
-	        VMI_EVENT_RESPONSE_VMM_PAGETABLE_ID);
+		VMI_EVENT_RESPONSE_VMM_PAGETABLE_ID);
 }
 #endif // ARM64
 
@@ -282,26 +282,75 @@ free_nif_page_node (gpointer data)
 
 	// Stop monitoring
 	vmi_set_mem_event(xa.vmi,
-	                  pnode->shadow_frame,
-	                  VMI_MEMACCESS_N,
-	                  alt_view1 );
+			  pnode->shadow_frame,
+			  VMI_MEMACCESS_N,
+			  alt_view1 );
 
 	xc_altp2m_change_gfn (xa.xci, xa.domain_id,alt_view1,pnode->frame,~(0UL));
 	xc_altp2m_change_gfn (xa.xci, xa.domain_id,alt_view1,pnode->shadow_frame,~(0UL));
 
 	xc_domain_decrease_reservation_exact(xa.xci,
-	                                     xa.domain_id,
-	                                     1, 0,
-	                                     (xen_pfn_t*)&pnode->shadow_frame);
+					     xa.domain_id,
+					     1, 0,
+					     (xen_pfn_t*)&pnode->shadow_frame);
 	g_free(pnode);
 }
 
 int
+nif_is_monitored(addr_t kva, bool * monitored)
+{
+	int rc = 0;
+	addr_t pa, frame;
+	status_t status;
+	nif_page_node*  pgnode  = NULL;
+	nif_hook_node* hook_node = NULL;
+
+	addr_t shadow;
+	addr_t shadow_frame, offset;
+
+	*monitored = false;
+
+	status = vmi_translate_kv2p (xa.vmi, kva, &pa);
+	if (VMI_SUCCESS != status) {
+		rc = EINVAL;
+		fprintf(stderr, "Failed to find PA for VA=%" PRIx64 "\n", kva);
+		goto exit;
+	}
+
+	frame = pa >> PG_OFFSET_BITS;
+	offset = pa % DOM_PAGE_SIZE;
+
+	shadow_frame = (addr_t) GPOINTER_TO_SIZE (g_hash_table_lookup(xa.pframe_sframe_mappings,
+								      GSIZE_TO_POINTER(frame)));
+
+	if (0 == shadow_frame) {
+		goto exit;
+	}
+
+	pgnode = g_hash_table_lookup(xa.shadow_pnode_mappings, GSIZE_TO_POINTER(shadow_frame));
+	if (NULL == pgnode) {
+		goto exit;
+	}
+
+	hook_node = g_hash_table_lookup(pgnode->offset_bp_mappings,
+					GSIZE_TO_POINTER(offset));
+	if (NULL == hook_node) {
+		goto exit;
+	}
+
+	*monitored = true;
+
+exit:
+	return rc;
+}
+
+
+int
 nif_enable_monitor (addr_t kva,
-                    const char* name,
-                    nif_event_callback_t pre_cb,
-                    nif_event_callback_t post_cb,
-                    void* cb_arg)
+		    const char* name,
+		    nif_event_callback_t pre_cb,
+		    nif_event_callback_t post_cb,
+		    void* cb_arg)
 {
 	int rc = 0;
 	size_t ret;
@@ -310,12 +359,12 @@ nif_enable_monitor (addr_t kva,
 	nif_hook_node* hook_node = NULL;
 	addr_t pa, frame;
 	addr_t shadow;
-	addr_t shadow_frame, shadow_offset;
+	addr_t shadow_frame, offset;
 	uint8_t buff[DOM_PAGE_SIZE] = {0};
 	addr_t dtb = 0;
 	trap_val_t orig1 = 0;
 	trap_val_t orig2 = 0;
-	
+
 	// Read orig values
 	status  = read_trap_val_va (xa.vmi, kva, &orig1);
 #if defined(ARM64)
@@ -327,24 +376,18 @@ nif_enable_monitor (addr_t kva,
 		goto done;
 	}
 
-	// TODO: remove dtb, pa stuff from here. We're only using kernel addresses at this stage.
-	if (VMI_FAILURE == vmi_pid_to_dtb (xa.vmi, 0, &dtb)) {
+	status = vmi_translate_kv2p (xa.vmi, kva, &pa);
+	if (VMI_SUCCESS != status) {
 		rc = EINVAL;
-		fprintf(stderr,"Shadow: Couldn't get dtb\n");
-		goto done;
-	}
-	// vmi_translate_kv2p (xa.vmi, kva, &pa);
-	if (VMI_SUCCESS != vmi_pagetable_lookup (xa.vmi,dtb, kva, &pa)) {
-		rc = EINVAL;
-		fprintf(stderr,"Shadow: Couldn't get pagetable information\n");
+		fprintf(stderr, "Failed to find PA for VA=%" PRIx64 "\n", kva);
 		goto done;
 	}
 
 	frame = pa >> PG_OFFSET_BITS;
-	shadow_offset = pa % DOM_PAGE_SIZE;
-	
+	offset = pa % DOM_PAGE_SIZE;
+
 	shadow_frame = (addr_t) GPOINTER_TO_SIZE (g_hash_table_lookup(xa.pframe_sframe_mappings,
-	                                    GSIZE_TO_POINTER(frame)));
+								      GSIZE_TO_POINTER(frame)));
 
 	if (0 == shadow_frame) {
 		// Allocate frame if not already there
@@ -357,8 +400,8 @@ nif_enable_monitor (addr_t kva,
 		}
 
 		g_hash_table_insert (xa.pframe_sframe_mappings, //create new translation
-		                     GSIZE_TO_POINTER(frame),
-		                     GSIZE_TO_POINTER(shadow_frame));
+				     GSIZE_TO_POINTER(frame),
+				     GSIZE_TO_POINTER(shadow_frame));
 
 		// Update p2m mapping: alt_view1: frame --> shadow_frame
 		if (0 != xc_altp2m_change_gfn(xa.xci, xa.domain_id, alt_view1, frame, shadow_frame)) {
@@ -369,17 +412,16 @@ nif_enable_monitor (addr_t kva,
 	}
 
 	// shadow_frame is now known
-//	shadow = (shadow_frame << PG_OFFSET_BITS) + shadow_offset;
 	fprintf (stderr, "shadow %lx shadow_frame %lx for va %lx\n",
 		 shadow, shadow_frame, kva);
 
 	pgnode = g_hash_table_lookup(xa.shadow_pnode_mappings, GSIZE_TO_POINTER(shadow_frame));
 	if (NULL == pgnode) {
 		status = vmi_read_pa(xa.vmi,
-		                     MKADDR(frame, 0),
-		                     DOM_PAGE_SIZE,
-		                     buff,
-		                     &ret);
+				     MKADDR(frame, 0),
+				     DOM_PAGE_SIZE,
+				     buff,
+				     &ret);
 		if (DOM_PAGE_SIZE != ret || status == VMI_FAILURE) {
 			rc = EACCES;
 			fprintf(stderr,"Shadow: Failed to read syscall page\n");
@@ -388,9 +430,9 @@ nif_enable_monitor (addr_t kva,
 
 		status = vmi_write_pa(xa.vmi,
 				      MKADDR(shadow_frame, 0),
-		                      DOM_PAGE_SIZE,
-		                      buff,
-		                      &ret);
+				      DOM_PAGE_SIZE,
+				      buff,
+				      &ret);
 		if (DOM_PAGE_SIZE != ret || status == VMI_FAILURE) {
 			rc = EACCES;
 			fprintf(stderr,"Shadow: Failed to write to shadow page\n");
@@ -409,7 +451,7 @@ nif_enable_monitor (addr_t kva,
 	} else {
 		// Check for existing hooks: if one exists, we're done
 		hook_node = g_hash_table_lookup(pgnode->offset_bp_mappings,
-		                             GSIZE_TO_POINTER(shadow_offset));
+						GSIZE_TO_POINTER(offset));
 		if (NULL != hook_node) {
 			fprintf (stderr, "Found hook already in place for va %" PRIx64 "\n", kva);
 			goto done;
@@ -426,10 +468,10 @@ nif_enable_monitor (addr_t kva,
 	fprintf (stderr, "Writing trap %x to PA (ARM: and PA+4) %" PRIx64 ", backup1=%x\n",
 		 trap, shadow, orig1);
 
-	status  = write_trap_val_pa (xa.vmi, MKADDR(shadow_frame, shadow_offset), trap);
+	status  = write_trap_val_pa (xa.vmi, MKADDR(shadow_frame, offset), trap);
 #if defined(ARM64)
 	//status |= write_trap_val_pa (xa.vmi, shadow + 4, trap);
-	status |= write_trap_val_pa (xa.vmi, MKADDR(frame,  shadow_offset) + 4, trap);
+	status |= write_trap_val_pa (xa.vmi, MKADDR(frame,  offset) + 4, trap);
 #endif
 	if (VMI_SUCCESS != status) {
 		rc = EACCES;
@@ -441,7 +483,7 @@ nif_enable_monitor (addr_t kva,
 	hook_node = g_new0(nif_hook_node, 1);
 	strncpy(hook_node->name, name, MAX_SNAME_LEN);
 	hook_node->parent     = pgnode;
-	hook_node->offset     = shadow_offset;
+	hook_node->offset     = offset;
 	hook_node->pre_cb     = pre_cb;
 	hook_node->post_cb    = post_cb;
 	hook_node->cb_arg     = cb_arg;
@@ -449,10 +491,10 @@ nif_enable_monitor (addr_t kva,
 	hook_node->backup_val1 = orig2;
 
 	g_hash_table_insert(pgnode->offset_bp_mappings,
-	                    GSIZE_TO_POINTER(shadow_offset),
-	                    hook_node);
+			    GSIZE_TO_POINTER(offset),
+			    hook_node);
 
-	//fprintf(stderr,"\nInside: New bp node inserted with offset %" PRIx64 "", shadow_offset);
+	//fprintf(stderr,"\nInside: New bp node inserted with offset %" PRIx64 "", offset);
 done:
 	return rc;
 }
@@ -467,7 +509,7 @@ singlestep_cb(vmi_instance_t vmi, vmi_event_t* event)
 	event->slat_id = alt_view1;
 
 	return (VMI_EVENT_RESPONSE_TOGGLE_SINGLESTEP|
-	        VMI_EVENT_RESPONSE_VMM_PAGETABLE_ID);
+		VMI_EVENT_RESPONSE_VMM_PAGETABLE_ID);
 }
 
 static int
@@ -638,7 +680,7 @@ nif_init(const char* name)
 	// Initialize the libvmi library.
 	if (VMI_FAILURE ==
 	    vmi_init_complete(&xa.vmi, (void*)name, VMI_INIT_DOMAINNAME| VMI_INIT_EVENTS,NULL,
-	                      VMI_CONFIG_GLOBAL_FILE_ENTRY, NULL, NULL)) {
+			      VMI_CONFIG_GLOBAL_FILE_ENTRY, NULL, NULL)) {
 		rc = EIO;
 		fprintf(stderr,"Failed to init LibVMI library.\n");
 		goto exit;
@@ -680,8 +722,8 @@ nif_init(const char* name)
 #if 0 && !defined(ARM64)
 	//Setup a generic mem_access event.
 	SETUP_MEM_EVENT(&mem_event,0,
-	                VMI_MEMACCESS_RWX,
-	                mem_intchk_cb,1);
+			VMI_MEMACCESS_RWX,
+			mem_intchk_cb,1);
 
 	if (VMI_SUCCESS !=vmi_register_event(xa.vmi, &mem_event)) {
 		rc = EIO;

@@ -6,8 +6,8 @@
  * Developers: Matt Leinhos
  */
 
-#ifndef NVMI_CALLBACK_TEMPLATES_H
-#define NVMI_CALLBACK_TEMPLATES_H
+#ifndef NVMI_EVENT_TEMPLATES_H
+#define NVMI_EVENT_TEMPLATES_H
 
 //#define NVMI_MAX_SYSCALL_NAME_LEN 32
 
@@ -40,7 +40,6 @@ typedef enum _nvmi_arg_type {
  * Definition of a syscall argument
  */
 typedef struct _nvmi_syscall_arg {
-	//const char * name;
 	enum syscall_arg_type type;
 } nvmi_syscall_arg_t;
 
@@ -166,4 +165,4 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 
 };
 
-#endif // NVMI_CALLBACK_TEMPLATES_H
+#endif // NVMI_EVENT_TEMPLATES_H

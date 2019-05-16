@@ -50,6 +50,8 @@ nif_get_vmi (vmi_instance_t* vmi);
 int
 nif_event_loop (void);
 
+int
+nif_is_monitored(addr_t kva, bool * monitored);
 
 int
 nif_enable_monitor (addr_t kva,
