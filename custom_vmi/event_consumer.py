@@ -36,12 +36,12 @@ def main():
         msg = subscriber.recv()
         if msg == b'END':
             break
-        print(msg)
+        print(msg.decode())
         nbr += 1
 
-        if nbr % 10 == 0:
-            print ("Sending value on request channel")
-            requestor.send (struct.pack("=l", 33333), 0) #zmq.DONTWAIT)
+        #if nbr % 10 == 0:
+        #    print ("Sending value on request channel")
+        #    requestor.send (struct.pack("=l", 33333), 0) #zmq.DONTWAIT)
 
     print ('Received %d updates' % nbr)
     

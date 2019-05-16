@@ -32,6 +32,8 @@
 #include <sys/socket.h>
 #include <netdb.h>
 
+#include <zmq.h>
+
 #include "nif-vmi-iface.h"
 #include "nvmi-syscall-defs.h"
 #include "process_kill_helper.h"
@@ -40,6 +42,12 @@
 #define NVMI_EVENT_QUEUE_TIMEOUT_uS (5 * 1000)
 
 #define NVMI_KSTACK_MASK (~0x1fff) // 8k stack
+
+#define ZMQ_EVENT_CHANNEL "tcp://*:5555"
+#define ZMQ_REQUEST_CHANNEL "tcp://localhost:5556"
+
+#define KILL_PID_NONE ((vmi_pid_t)-1)
+
 //
 // Special instrumentation points
 //
@@ -78,6 +86,9 @@ typedef struct _nvmi_state {
 	// Special-case breakpoints
 	addr_t va_exit_mm;
 
+	void* zmq_context;
+	void* zmq_event_socket;
+	void* zmq_request_socket;
 	
 	// Maps easy value to process context, e.g. curent
 	// task_struct, or base kernel stack pointer.
@@ -85,6 +96,9 @@ typedef struct _nvmi_state {
 
 	GThread * consumer_thread;
 	GAsyncQueue * event_queue;
+
+	// Handles inboudn requests over ZMQ
+	GThread * request_service_thread;
 	
 } nvmi_state_t;
 
@@ -842,6 +856,11 @@ handle_syscall_event (nvmi_event_t * evt)
 
 	strncat (buf, buf2, sizeof(buf) - strlen(buf) - 1);
 
+	rc = zmq_send (gstate.zmq_event_socket, buf, strlen(buf)+1, 0);
+        if (rc < 0) {
+		fprintf(stderr, "zmq_send() failed: %d\n", rc);
+        }
+
 	fprintf (stderr, "%s\n", buf);
 
 //exit:
@@ -976,6 +995,96 @@ exit:
 	return rc;
 }
 
+static gpointer
+comms_request_servicer (gpointer data)
+{
+    int rc = 0;
+
+    void* subscriber = zmq_socket (gstate.zmq_context, ZMQ_PAIR);
+    if (NULL == subscriber) {
+        rc = zmq_errno();
+        fprintf(stderr, "zmq_socket() failed");
+        goto exit;
+    }
+
+    zmq_connect (subscriber, ZMQ_REQUEST_CHANNEL);
+
+    while (!gstate.interrupted) {
+        char msg[30] = {0};
+        vmi_pid_t pid = -1;
+
+	rc = zmq_recv (subscriber, msg, sizeof(msg), 0);
+        if (rc <= 0) {
+            fprintf (stderr, "Received empty string. All done.\n");
+            break;
+        }
+    
+        //
+        // Set global killpid: now syscall hook will watch for this pid
+        //
+
+        pid = *(vmi_pid_t*) msg;
+        printf ("received raw pid --> %d\n", pid);
+
+        gstate.killpid = pid;
+
+        //free (str);
+    }
+
+exit:
+    return NULL;
+}
+
+static void
+comms_fini(void)
+{
+	if (gstate.zmq_event_socket)  zmq_close (gstate.zmq_event_socket);
+	if (gstate.zmq_context) zmq_ctx_destroy (gstate.zmq_context);
+
+	if (gstate.request_service_thread) {
+		g_thread_join (gstate.request_service_thread);
+	}
+
+	if (gstate.zmq_request_socket)  zmq_close (gstate.zmq_request_socket);
+
+	gstate.zmq_context = NULL;
+	gstate.zmq_event_socket  = NULL;
+	gstate.zmq_request_socket  = NULL;
+}
+
+static int
+comms_init(void)
+{
+	int rc = 0;
+
+	gstate.zmq_context = zmq_ctx_new();
+	if (NULL == gstate.zmq_context) {
+		rc = errno;
+		fprintf(stderr, "zmq_ctx_new() failed\n");
+		goto exit;
+	}
+
+	gstate.zmq_event_socket = zmq_socket (gstate.zmq_context, ZMQ_PAIR);
+	if (NULL == gstate.zmq_event_socket) {
+		rc = zmq_errno();
+		fprintf(stderr, "zmq_socket() failed");
+		goto exit;
+	}
+
+	rc = zmq_bind (gstate.zmq_event_socket, ZMQ_EVENT_CHANNEL);
+	if (rc) {
+		fprintf (stderr, "zmq_connect(" ZMQ_EVENT_CHANNEL ") failed: %d\n", rc);
+		goto exit;
+	}
+
+	gstate.request_service_thread = g_thread_new ("request servicer", comms_request_servicer, NULL);
+
+exit:
+	return rc;
+}
+
+
+
 int
 main (int argc, char* argv[])
 {
@@ -998,7 +1107,7 @@ main (int argc, char* argv[])
 	sigaction(SIGINT,  &gstate.act, NULL);
 	sigaction(SIGALRM, &gstate.act, NULL);
 
-//	rc = comms_init();
+	rc = comms_init();
 	if (rc) {
 		goto exit;
 	}
@@ -1029,7 +1138,7 @@ exit:
 	nif_stop();
 	nif_fini();
 	nvmi_main_fini();
-//	comms_fini();
+	comms_fini();
 
 	return rc;
 }
