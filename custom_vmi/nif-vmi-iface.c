@@ -11,6 +11,7 @@
 
 
 #include "nif-vmi-iface.h"
+#include "nvmi-common.h"
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
@@ -87,7 +88,7 @@ typedef struct nif_page_node {
 // Track one hook (instrumentation point)
 typedef struct nif_hook_node {
 	addr_t			offset;
-	char 			name[MAX_SNAME_LEN];
+	char 			name[SYSCALL_MAX_NAME_LEN];
 	nif_page_node*		parent;
 
 	nif_event_callback_t	pre_cb;
@@ -147,11 +148,11 @@ free_pg_hks_lst (gpointer data)
 	nif_hook_node* hook_node = data;
 
 	(void) write_trap_val_pa (xa.vmi,
-	                          (hook_node->parent->shadow_frame << PG_OFFSET_BITS) + hook_node->offset,
+				  MKADDR(hook_node->parent->shadow_frame, hook_node->offset),
 	                          hook_node->backup_val1);
 #if defined(ARM64)
 	(void) write_trap_val_pa (xa.vmi,
-	                          (hook_node->parent->shadow_frame << PG_OFFSET_BITS) + hook_node->offset + 4,
+	                          MKADDR(hook_node->parent->shadow_frame, hook_node->offset) + 4,
 	                          hook_node->backup_val2);
 #endif
 	g_free(hook_node);
@@ -172,10 +173,8 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 	nif_hook_node* hook_node = NULL;
 	addr_t shadow = 0;
 
-	fprintf (stderr, "%s:%d\n", __FUNCTION__, __LINE__);
 	if (event->slat_id == 0) { // SW SINGLE STEP
 		event->slat_id = alt_view1;
-		fprintf (stderr, "%s:%d\n", __FUNCTION__, __LINE__);
 		// TODO: track post CBs on a per-vcpu basis and call appropriate one
 		return (VMI_EVENT_RESPONSE_VMM_PAGETABLE_ID);
 	}
@@ -186,7 +185,6 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 		g_hash_table_lookup(xa.pframe_sframe_mappings,
 				    GSIZE_TO_POINTER(event->privcall_event.gfn)));
 	if (0 == shadow) {
-		fprintf (stderr, "%s:%d\n", __FUNCTION__, __LINE__);
 		// No need to reinject since smc is not available to guest
 		return VMI_EVENT_RESPONSE_NONE;
 	}
@@ -200,7 +198,7 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 
 	hook_node = g_hash_table_lookup (pgnode_temp->offset_bp_mappings,
 					 GSIZE_TO_POINTER(event->privcall_event.offset));
-	if (NULL == pgnode_temp) {
+	if (NULL == hook_node) {
 		fprintf (stderr, "Warning: No BP record found for this offset %" PRIx64 " on page %" PRIx16 "",
 			 event->privcall_event.offset, event->privcall_event.gfn);
 		return VMI_EVENT_RESPONSE_NONE;
@@ -213,11 +211,9 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 
 	//vcpu_hook_nodes [event->vcpu_id] = hook_node;
 
-//exit:
 	if (event->slat_id == alt_view1) {
 		event->slat_id = 0;
 	}
-	fprintf (stderr, "%s:%d\n", __FUNCTION__, __LINE__);
 
 	return (VMI_EVENT_RESPONSE_VMM_PAGETABLE_ID);
 }
@@ -255,9 +251,10 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 
 	hook_node = g_hash_table_lookup(pgnode_temp->offset_bp_mappings,
 	                                GSIZE_TO_POINTER(event->interrupt_event.offset));
-	if (NULL == pgnode_temp) {
-		fprintf(stderr,"Can't find pg_node for shadow: %" PRIx64 "\n", shadow);
-		event->interrupt_event.reinject = INTERRUPT_REINJECT_VAL;
+	if (NULL == hook_node) {
+		fprintf(stderr, "No hook record found for this offset %" PRIx64 " on page %" PRIx64 "\n",
+			event->interrupt_event.offset, event->interrupt_event.gfn);
+		event->interrupt_event.reinject = 1;
 		return VMI_EVENT_RESPONSE_NONE;
 	}
 
@@ -312,7 +309,8 @@ nif_enable_monitor (addr_t kva,
 	nif_page_node*  pgnode  = NULL;
 	nif_hook_node* hook_node = NULL;
 	addr_t pa, frame;
-	addr_t shadow, shadow_frame, shadow_offset;
+	addr_t shadow;
+	addr_t shadow_frame, shadow_offset;
 	uint8_t buff[DOM_PAGE_SIZE] = {0};
 	addr_t dtb = 0;
 	trap_val_t orig1 = 0;
@@ -371,14 +369,14 @@ nif_enable_monitor (addr_t kva,
 	}
 
 	// shadow_frame is now known
-	shadow = (shadow_frame << PG_OFFSET_BITS) + shadow_offset;
+//	shadow = (shadow_frame << PG_OFFSET_BITS) + shadow_offset;
 	fprintf (stderr, "shadow %lx shadow_frame %lx for va %lx\n",
 		 shadow, shadow_frame, kva);
 
 	pgnode = g_hash_table_lookup(xa.shadow_pnode_mappings, GSIZE_TO_POINTER(shadow_frame));
 	if (NULL == pgnode) {
 		status = vmi_read_pa(xa.vmi,
-		                     frame << PG_OFFSET_BITS,
+		                     MKADDR(frame, 0),
 		                     DOM_PAGE_SIZE,
 		                     buff,
 		                     &ret);
@@ -389,7 +387,7 @@ nif_enable_monitor (addr_t kva,
 		}
 
 		status = vmi_write_pa(xa.vmi,
-		                      shadow_frame << PG_OFFSET_BITS,
+				      MKADDR(shadow_frame, 0),
 		                      DOM_PAGE_SIZE,
 		                      buff,
 		                      &ret);
@@ -428,14 +426,14 @@ nif_enable_monitor (addr_t kva,
 	fprintf (stderr, "Writing trap %x to PA (ARM: and PA+4) %" PRIx64 ", backup1=%x\n",
 		 trap, shadow, orig1);
 
-	status  = write_trap_val_pa (xa.vmi, shadow, trap);
+	status  = write_trap_val_pa (xa.vmi, MKADDR(shadow_frame, shadow_offset), trap);
 #if defined(ARM64)
 	//status |= write_trap_val_pa (xa.vmi, shadow + 4, trap);
-	status |= write_trap_val_pa (xa.vmi, (frame << PG_OFFSET_BITS) + shadow_offset + 4, trap);
+	status |= write_trap_val_pa (xa.vmi, MKADDR(frame,  shadow_offset) + 4, trap);
 #endif
 	if (VMI_SUCCESS != status) {
 		rc = EACCES;
-		fprintf (stderr, "Failed to write trap val at %" PRIx64 "\n", shadow);
+		fprintf (stderr, "Failed to write trap val at orig or shadow page\n");
 		goto done;
 	}
 
@@ -553,6 +551,10 @@ static void clean_xen_monitor(void)
 
 static void destroy_views(uint32_t domain_id)
 {
+	if (NULL == xa.xci) {
+		return;
+	}
+
 	if (0!= xc_altp2m_switch_to_view(xa.xci, domain_id, 0))
 		fprintf(stderr,"Failed to switch to exe view in func destroy_view\n");
 
@@ -562,6 +564,7 @@ static void destroy_views(uint32_t domain_id)
 	if (0!= xc_altp2m_set_domain_state(xa.xci, domain_id, 0))
 		fprintf(stderr,"Failed to disable alternate view for domain_id: %u\n",domain_id);
 }
+
 
 static int
 inst_xen_monitor(const char* name)
@@ -746,7 +749,7 @@ nif_event_loop (void)
 		status_t status = vmi_events_listen(xa.vmi,500);
 		if (status != VMI_SUCCESS) {
 			fprintf(stderr,"Some issue in the event_listen loop. Aborting!\n\n");
-			interrupted = -1;
+			interrupted = true;
 			rc = EBUSY;
 		}
 	}

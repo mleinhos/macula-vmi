@@ -8,7 +8,7 @@ CFLAGS = -I../common -I.
 #CFLAGS += -O3 -g
 CFLAGS += -O0 -ggdb
 
-TARGET = NInspector
+TARGET = NInspector 
 
 ifeq ($(_arch), aarch64)
 # ARM64 definitions
@@ -35,6 +35,9 @@ OBJS = nvmi-main.o nif-vmi-iface.o process_kill_helper.o
 all: $(TARGET)
 
 $(TARGET): $(OBJS)
+	$(CC) -o $@ $^ $(CFLAGS) $(LIBS)
+
+NInspector-orig: nvmi.o process_kill_helper.o
 	$(CC) -o $@ $^ $(CFLAGS) $(LIBS)
 
 %.o: %.c $(DEPS)

@@ -6,15 +6,22 @@
  * Developers: Matt Leinhos
  */
 
-#ifndef NVMI_SYSCALL_DEFS_H
-#define NVMI_SYSCALL_DEFS_H
+#ifndef NVMI_CALLBACK_TEMPLATES_H
+#define NVMI_CALLBACK_TEMPLATES_H
 
-#define NVMI_DEFAULT_SOCKADDR_LEN 32 // TODO: get sizeof(struct sockaddr_in6)
-#define NVMI_MAX_SYSCALL_NAME_LEN 32
+//#define NVMI_MAX_SYSCALL_NAME_LEN 32
 
 #include <stdint.h>
 #include <stdbool.h>
 #include "nvmi-common.h"
+
+
+typedef enum _nvmi_callback_type {
+	NVMI_CALLBACK_NONE = 0,
+	NVMI_CALLBACK_SYSCALL,
+	NVMI_CALLBACK_SPECIAL,
+} nvmi_callback_type_t;
+
 
 /**
  * The types of syscall arguments supported
@@ -34,61 +41,73 @@ typedef enum _nvmi_arg_type {
  */
 typedef struct _nvmi_syscall_arg {
 	//const char * name;
-	nvmi_arg_type_t type;
+	enum syscall_arg_type type;
 } nvmi_syscall_arg_t;
 
-typedef struct _nvmi_syscall_def {
-	char name[NVMI_MAX_SYSCALL_NAME_LEN]; // really,the suffix -- whatever's after sys_
+typedef struct _nvmi_cb_info {
+	nvmi_callback_type_t cb_type;
+	char name[SYSCALL_MAX_NAME_LEN];
+
+	// syscall specific
 	int argct;
 	bool does_deref;
 	bool enabled;
 	void * rtinfo; // runtime info
 	nvmi_syscall_arg_t args [NVMI_MAX_SYSCALL_ARG_CT];
-} nvmi_syscall_def_t;
+} nvmi_cb_info_t;
 
 
-static nvmi_syscall_def_t
+static nvmi_cb_info_t
 nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 {
-	{ .name = "open", .argct = 3, true, true, NULL,
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_open", .argct = 3, true, true, NULL,
 	  .args = { { .type = NVMI_ARG_TYPE_STR    },
 		    { .type = NVMI_ARG_TYPE_SCALAR } ,
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
-	{ .name = "openat", .argct = 4, true, true, NULL,
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_openat", .argct = 4, true, true, NULL,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_STR    },
 		    { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
-	{ .name = "read", .argct = 3, false, true, NULL,
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_read", .argct = 3, false, true, NULL,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_SCALAR  },
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
-	{ .name = "write", .argct = 3, false, true, NULL,
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_write", .argct = 3, false, true, NULL,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_SCALAR} } },
 
-	{ .name = "close", .argct = 1, false, true, NULL,
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_close", .argct = 1, false, true, NULL,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR }} },
 
-	{ .name = "bind", .argct = 3, true, true, NULL,
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_bind", .argct = 3, true, true, NULL,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_SA     } ,
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
-	{ .name = "connect", .argct = 3, true, true, NULL,
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_connect", .argct = 3, true, true, NULL,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_SA     } ,
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
-	{ .name = "gettimeofday", .argct = 2, false, true, NULL,
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_gettimeofday", .argct = 2, false, true, NULL,
 	  .args = { { .type = NVMI_ARG_TYPE_PVOID },
 		    { .type = NVMI_ARG_TYPE_PVOID } } },
 
-	{ .name = "mmap", .argct = 6, false, true, NULL,
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_mmap", .argct = 6, false, true, NULL,
 	  .args = { { .type = NVMI_ARG_TYPE_PVOID },
 		    { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_SCALAR },
@@ -96,35 +115,45 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 		    { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
-	{ .name = "munmap", .argct = 3, false, true, NULL,
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_munmap", .argct = 3, false, true, NULL,
 	  .args = { { .type = NVMI_ARG_TYPE_PVOID },
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
-	{ .name = "lseek", .argct = 3, false, true, NULL,
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_lseek", .argct = 3, false, true, NULL,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_SCALAR } ,
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
-	{ .name = "chown", .argct = 3, true, true, NULL,
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_chown", .argct = 3, true, true, NULL,
 	  .args = { { .type = NVMI_ARG_TYPE_STR },
 		    { .type = NVMI_ARG_TYPE_SCALAR } ,
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
-	{ .name = "getuid",  .argct = 0, false, true, NULL, .args = {} },
-	{ .name = "geteuid", .argct = 0, false, true, NULL, .args = {} },
-	{ .name = "getpid",  .argct = 0, false, true, NULL, .args = {} },
-	{ .name = "getpgrp", .argct = 0, false, true, NULL, .args = {} },
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_getuid",  .argct = 0, false, true, NULL, .args = {} },
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_geteuid", .argct = 0, false, true, NULL, .args = {} },
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_getpid",  .argct = 0, false, true, NULL, .args = {} },
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_getpgrp", .argct = 0, false, true, NULL, .args = {} },
 
-	{ .name = "wait4", .argct = 3, false, false, NULL, // very verbose!
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_wait4", .argct = 3, false, false, NULL, // very verbose!
 	  .args = { { .type = NVMI_ARG_TYPE_PVOID },
 		    { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_PVOID  } } },
 
-	{ .name = "clock_gettime", .argct = 2, false, true, NULL, // fairly verbose!
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_clock_gettime", .argct = 2, false, true, NULL, // fairly verbose!
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_PVOID  } } },
 
-	{ .name = "rt_sigaction", .argct = 3, false, true, NULL,
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_rt_sigaction", .argct = 3, false, true, NULL,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_PVOID  },
 		    { .type = NVMI_ARG_TYPE_PVOID  } } },
@@ -132,8 +161,9 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 	// !!!!!!!!!! INCOMPLETE/INCORRECT DEFS 
 	// While incorrect, keep argct == 0
 	// !!!!!!!!!!!!!!!!!!!!!!!!!!
-	{ .name = "futex", .argct = 0, false, true, NULL, .args = {} },
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_futex", .argct = 0, false, true, NULL, .args = {} },
 
 };
 
-#endif // NVMI_SYSCALL_DEFS_H
+#endif // NVMI_CALLBACK_TEMPLATES_H

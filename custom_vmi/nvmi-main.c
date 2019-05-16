@@ -39,6 +39,19 @@
 
 #define NVMI_EVENT_QUEUE_TIMEOUT_uS (5 * 1000)
 
+#define NVMI_KSTACK_MASK (~0x1fff) // 8k stack
+//
+// Special instrumentation points
+//
+static nvmi_cb_info_t
+nvmi_special_cbs[] =
+{
+#define NVMI_DO_EXIT_IDX 0
+	{ .cb_type = NVMI_CALLBACK_SPECIAL, .name = "do_exit" },
+#define NVMI_FD_INSTALL_IDX 1
+	{ .cb_type = NVMI_CALLBACK_SPECIAL, .name = "fd_install" },
+};
+
 
 //
 // Remaining TODO:
@@ -62,6 +75,10 @@ typedef struct _nvmi_state {
 
 	addr_t va_current_task;
 
+	// Special-case breakpoints
+	addr_t va_exit_mm;
+
+	
 	// Maps easy value to process context, e.g. curent
 	// task_struct, or base kernel stack pointer.
 	GHashTable * context_lookup;
@@ -72,6 +89,18 @@ typedef struct _nvmi_state {
 } nvmi_state_t;
 
 static nvmi_state_t gstate = {0};
+
+typedef unsigned long atomic_t;
+
+static inline atomic_t atomic_inc (atomic_t * val)
+{
+	return __sync_add_and_fetch (val, 1);
+}
+
+static inline atomic_t atomic_dec (atomic_t * val)
+{
+	return __sync_sub_and_fetch (val, 1);
+}
 
 
 static void
@@ -153,24 +182,32 @@ pre_gather_registers (vmi_instance_t vmi,
 	status_t status = VMI_SUCCESS;
 
 	for (int i = 0; i < argct; ++i) {
-		status_t status = vmi_get_vcpureg (vmi, &regs->syscall_args[i], nvmi_syscall_arg_regs[i], event->vcpu_id);
+		status_t status = vmi_get_vcpureg (vmi,
+						   &regs->syscall_args[i],
+						   nvmi_syscall_arg_regs[i],
+						   event->vcpu_id);
 		if (VMI_FAILURE == status) {
 			rc = EIO;
 			goto exit;
 		}
 	}
 
-	// Get the rest of the context too, for context lookup
+	// Get the rest of the context too, for context lookup. Beware KPTI!!
 #if defined(ARM64)
 	status  = vmi_get_vcpureg (vmi, &regs->arch.arm64.ttbr0, TTBR0, event->vcpu_id);
 	status |= vmi_get_vcpureg (vmi, &regs->arch.arm64.ttbr1, TTBR1, event->vcpu_id);
 	status |= vmi_get_vcpureg (vmi, &regs->arch.arm64.sp,   SP_USR, event->vcpu_id);
 	status |= vmi_get_vcpureg (vmi, &regs->arch.arm64.sp_el0, SP_EL0, event->vcpu_id);
 
+	fprintf (stderr, "context: ttbr0   = %lx\n", regs->arch.arm64.ttbr0);
+	fprintf (stderr, "context: ttbr1   = %lx\n", regs->arch.arm64.ttbr1);
+	fprintf (stderr, "context: sp_el0  = %lx\n", regs->arch.arm64.sp_el0);
+	fprintf (stderr, "context: sp      = %lx\n", regs->arch.arm64.sp);
+
 #else
 	status  = vmi_get_vcpureg (vmi, &regs->arch.intel.cr3, CR3,     event->vcpu_id);
 	status |= vmi_get_vcpureg (vmi, &regs->arch.intel.sp,  RSP,     event->vcpu_id);
-	status |= vmi_get_vcpureg (vmi, &regs->arch.intel.gs,  GS_BASE, event->vcpu_id);
+	status |= vmi_get_vcpureg (vmi, &regs->arch.intel.gs_base,  GS_BASE, event->vcpu_id);
 #endif
 	if (VMI_SUCCESS != status) {
 		rc = EFAULT;
@@ -182,45 +219,55 @@ exit:
 	return rc;
 }
 
-#if !defined(ARM64)
-//#if defined(X86_64) || defined(I386)
-static int
-get_current_task (vmi_instance_t vmi, reg_t gs_base, addr_t * task)
-{
-	int rc = 0;
-	status_t status;
-
-	status = vmi_read_addr_va(vmi,
-				  gs_base + gstate.va_current_task,
-	                          0,
-				  task);
-	if (VMI_SUCCESS != status) {
-		rc = EIO;
-		task = NULL;
-		fprintf (stderr, "Fast try: Fail to read anything at base+curr_task_offset\n");
-		goto exit;
-	}
-
-exit:
-	return rc;
-}
-#endif
 
 static void
 deref_task_context (gpointer arg)
 {
 	nvmi_task_info_t * tinfo = (nvmi_task_info_t *) arg;
-	int val = __sync_fetch_and_sub (&tinfo->refct, 1);
-
+	atomic_t val = 	atomic_dec (&tinfo->refct);
 	assert (val >= 0);
 
 	if (0 == val) {
+		fprintf (stderr, "**** Process pid=%ld comm=%s destroyed ****\n",
+			 tinfo->einfo.pid, tinfo->einfo.comm);
 		g_slice_free (nvmi_task_info_t, tinfo);
 	}
 }
 
 static int
-build_task_context (vmi_instance_t vmi, nvmi_registers_t * regs, nvmi_task_info_t ** tinfo)
+get_current_task (vmi_instance_t vmi,
+		  vmi_event_t * vmievent,
+		  nvmi_registers_t * regs,
+		  addr_t * task)
+{
+	int rc = 0;
+	
+#if defined(ARM64)
+	// Fast: get current task_struct *
+	*key = regs->arch.arm64.sp_el0;
+#else
+	// x86: slow
+	// key = regs->arch.intel.sp & NVMI_KSTACK_MASK;
+	// ^^^ too uncertain for a process identification ...
+	status_t status = vmi_read_addr_va(vmi,
+					   regs->arch.intel.gs_base + gstate.va_current_task,
+					   0,
+					   task);
+	if (VMI_SUCCESS != status) {
+		rc = EIO;
+		task = NULL;
+		fprintf (stderr, "Failed to determine current task (from gs_base + curr_task_offset)\n");
+		goto exit;
+	}
+#endif
+
+exit:
+	return rc;
+}
+
+
+static int
+build_task_context (vmi_instance_t vmi, nvmi_registers_t * regs, addr_t curr_task, nvmi_task_info_t ** tinfo)
 {
 	int rc = 0;
 	status_t status = VMI_SUCCESS;
@@ -228,19 +275,18 @@ build_task_context (vmi_instance_t vmi, nvmi_registers_t * regs, nvmi_task_info_
 
 	*tinfo = g_slice_new0 (nvmi_task_info_t);
 
-#if defined(ARM64)
-	(*tinfo)->p_task_struct = regs->arch.arm64.sp_el0;
-	(*tinfo)->kstack        = regs->arch.arm64.sp & ~0x3ff; // ??
-#else
-	(*tinfo)->kstack = regs->arch.intel.sp & ~0x3fff;
+	// TODO: context lifetime is mismanaged -- fix it.
+	atomic_inc (&(*tinfo)->refct);
 
-	rc = get_current_task (vmi, regs->arch.intel.gs, &(*tinfo)->p_task_struct);
-	if (rc) {
-		goto exit;
-	}
+#if defined(ARM64)
+	(*tinfo)->kstack = regs->arch.arm64.sp & NVMI_KSTACK_MASK; 
+#else
+	(*tinfo)->kstack = regs->arch.intel.sp & NVMI_KSTACK_MASK;
 #endif
+	(*tinfo)->p_task_struct = curr_task;
+
 	status = vmi_read_32_va(vmi,
-				(*tinfo)->p_task_struct + gstate.task_pid_ofs,
+				curr_task + gstate.task_pid_ofs,
 				0,
 				(uint32_t *) &(*tinfo)->einfo.pid);
 	if (VMI_FAILURE == status) {
@@ -262,10 +308,15 @@ build_task_context (vmi_instance_t vmi, nvmi_registers_t * regs, nvmi_task_info_
 
 	strncpy ((*tinfo)->einfo.comm, pname, sizeof((*tinfo)->einfo.comm));
 	free (pname);
-
-	// Take a reference for the guest process that "owns" this
-	// data. Once the process dies, remove that reference.
-	__sync_fetch_and_add (&(*tinfo)->refct, 1);
+/*
+	status = vmi_pid_to_dtb (vmi, (*tinfo)->einfo.pid, &(*tinfo)->updb);
+	if (VMI_FAILURE == status) {
+		rc = EIO;
+		fprintf (stderr, "Failed to find page base for task, pid=%ld\n",
+			 (*tinfo)->einfo.pid);
+		goto exit;
+	}
+*/
 
 exit:
 	return rc;
@@ -280,52 +331,127 @@ exit:
 static int
 pre_gather_context (vmi_instance_t vmi,
 		    vmi_event_t* vmievent,
-		    nvmi_syscall_def_t * sc,
+		    nvmi_cb_info_t * cbi,
 		    nvmi_event_t ** event)
 {
 	int rc = 0;
 	status_t status = VMI_SUCCESS;
 	reg_t key = 0;
+	addr_t curr_task = 0;
 	nvmi_task_info_t * task = NULL;
 	nvmi_event_t * evt = (nvmi_event_t *) g_slice_new0 (nvmi_event_t);
-	int argct = (NULL == sc ? 0 : sc->argct);
-	
+	int argct = (NULL == cbi ? 0 : cbi->argct);
+
 	rc = pre_gather_registers (vmi, vmievent, &evt->r, argct);
 	if (rc) {
 		goto exit;
 	}
 
-#if defined(ARM64)
-	key = evt->r.arch.arm64.sp_el0;
-//	status = vmi_get_vcpureg (vmi, &key, SP_EL0, event->vcpu_id);
-#else
-//	status = vmi_get_vcpureg (vmi, &key, RSP, event->vcpu_id);
-//	key &= ~0x3fff; // base of 16k stack
-	key = evt->r.arch.intel.sp & ~0x3fff;
-#endif
+	rc = get_current_task (vmi, vmievent, &evt->r, &curr_task);
+	if (rc) {
+		fprintf (stderr, "Context could not be found\n");
+		goto exit;
+	}
 
-	// look for key in gstate.context_lookup. If it isn't there,
+	// Look for key in gstate.context_lookup. If it isn't there,
 	// then allocate new nvmi_task_info_t and populate it
-	task = g_hash_table_lookup (gstate.context_lookup, (gpointer)key);
+	task = g_hash_table_lookup (gstate.context_lookup, (gpointer)curr_task);
 	if (NULL == task) {
 		// build new context
-		rc = build_task_context (vmi, &evt->r, &task);
+
+		rc = build_task_context (vmi, &evt->r, curr_task, &task);
 		if (rc) {
 			goto exit;
 		}
+		// The system owns a reference. When the task dies, we remove it.
+		atomic_inc (&task->refct);
 
-		// hash table holds a reference ??
-		//__sync_fetch_and_add (&task->refct, 1);
+		task->key = key;
 		g_hash_table_insert (gstate.context_lookup, (gpointer)key, task);
+		// The table owns a reference to the task context.
+//		atomic_inc (&task->refct);
 	}
 
 	evt->task = task;
-	evt->sc   = sc;
+
+	evt->cbi   = cbi;
 	*event = evt;
 
 exit:
 	return rc;
 }
+
+
+static char *
+read_memory (vmi_instance_t vmi,
+	     nvmi_event_t * evt,
+	     addr_t va,
+	     size_t maxlen,
+	     enum syscall_arg_type type)
+{
+	int rc = 0;
+	status_t status = VMI_SUCCESS;
+	addr_t pa = 0;
+	bool read_more = true;
+	char * str = NULL;
+	addr_t pdb = 0;
+
+#if defined(X86_64)
+
+#  if 1 // x86: works
+	str = vmi_read_str_va (vmi, va, evt->task->einfo.pid);
+	if (NULL == str) {
+		fprintf(stderr, "Error: could not read string at %" PRIx64 " in PID %lx\n",
+			va, evt->task->einfo.pid);
+		goto exit;
+	}
+#  endif
+
+#  if 0 // x86: works
+	status = vmi_pid_to_dtb (vmi, evt->task->einfo.pid, &pdb);
+	if (VMI_FAILURE == status) {
+		rc = EIO;
+		fprintf(stderr, "Error could get PDB for pid %ld\n", evt->task->einfo.pid);
+		goto exit;
+	}
+	
+	access_context_t ctx = { .translate_mechanism = VMI_TM_PROCESS_DTB,
+				 .dtb = pdb,
+/*
+  #if defined(ARM64)
+  .dtb = evt->r.arch.arm64.ttbr1,
+  #else
+  .dtb = evt->r.arch.intel.updb,
+  #endif
+*/
+				 .addr = va };
+	// better to read directly into caller buffer
+
+	str = vmi_read_str(vmi, &ctx);
+//	if (VMI_FAILURE == status) {
+	if (NULL == str) {
+		rc = EIO;
+		fprintf(stderr, "Error could get PA from VA %" PRIx64 ".\n", va);
+		goto exit;
+	}
+//	status = vmi_pagetable_lookup (vmi, evt->r.ttrb1, va, &pa);
+//	status = vmi_read_va (vmi, va, evt->r.ttbr1)
+#  endif
+	
+	fprintf (stderr, "Successfully read string '%s' from mem (%lx pid %lx)\n",
+		 str, va, evt->task->einfo.pid);
+	
+#else
+	// FIXME: fix user mem deref on ARM
+	// TODO: clear out v2p cache prior to translation
+	str = strdup("[ARM: unknown value (FIXME)]")
+#endif
+	
+exit:
+//	return rc;
+	return str;
+}
+
 
 /**
  * pre_instr_cb()
@@ -338,51 +464,45 @@ pre_instr_cb (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 {
 	int rc = 0;
 	status_t status = VMI_SUCCESS;
-	nvmi_syscall_def_t * sc = (nvmi_syscall_def_t *) arg;
+
+	// arg / cbi tells us whether this is syscall or special event
+	nvmi_cb_info_t * cbi = (nvmi_cb_info_t *) arg;
 	nvmi_event_t * evt = NULL;
 
 	// Ugly impl first: clean this up later
-	fprintf (stderr, "%s:%d\n", __FUNCTION__, __LINE__);
+	assert (NULL == cbi ||
+		cbi->argct <= NUMBER_OF(nvmi_syscall_arg_regs));
 
-	assert (NULL == sc ||
-		sc->argct <= NUMBER_OF(nvmi_syscall_arg_regs));
-
-	rc = pre_gather_context (vmi, event, sc, &evt);
+	rc = pre_gather_context (vmi, event, cbi, &evt);
 	if (rc) {
 		goto exit;
 	}
 
-	if (NULL == sc) {
-		// We don't have any metadata on this syscall
+	if (NULL == cbi) {
+		// We don't have any metadata on this event
 		goto exit;
 	}
 
-	fprintf (stderr, "PRE: syscall: %s pid=%ld comm=%s \n",
-		sc->name, evt->task->einfo.pid, evt->task->einfo.comm);
+	//fprintf (stderr, "PRE: syscall: %s pid=%ld comm=%s \n",
+	//cbi->name, evt->task->einfo.pid, evt->task->einfo.comm);
 	
-	for (int i = 0; i < sc->argct; ++i) {
+	for (int i = 0; i < cbi->argct; ++i) {
 		reg_t val = evt->r.syscall_args[i];
 		char * buf = NULL;
 
-		switch (sc->args[i].type) {
+		switch (cbi->args[i].type) {
 		case NVMI_ARG_TYPE_SCALAR:
-//			printf ("\targ %d: %lx\n", i, val);
 			break;
 		case NVMI_ARG_TYPE_STR:
-			buf = vmi_read_str_va (vmi,
-					       val,
-					       evt->task->einfo.pid);
+			buf = read_memory (vmi, evt, val, 0, 0);
 			if (NULL == buf) {
 				fprintf (stderr, "Failed to read str syscall arg\n");
 				continue;
 			}
-
 			// Only worry about 1 dereferenced pointer, for now
 			evt->mem_ofs[i] = 0;
 			evt->arg_lens[i] = MIN(sizeof(evt->mem), strlen(buf));
 			strncpy (evt->mem, buf, sizeof(evt->mem));
-			
-//			printf ("\targ %d: %s\n", i, buf);
 			free (buf);
 			break;
 		case NVMI_ARG_TYPE_SA: {
@@ -417,7 +537,8 @@ pre_instr_cb (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 		}
 	}
 
-//	__sync_fetch_and_add (&evt->task->refct, 1);
+	// The event owns a reference
+	atomic_inc (&evt->task->refct);
 	g_async_queue_push (gstate.event_queue, (gpointer) evt);
 
 exit:
@@ -431,19 +552,131 @@ post_instr_cb (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 	printf ("Post: Hit breakpoint: %s\n", (const char*) arg);
 }
 
+
+static int
+handle_special_instr_point (const char *name, addr_t kva)
+{
+	int rc = ENOENT;
+	nvmi_cb_info_t * cbi = NULL;
+
+	for (int i = 0; i < NUMBER_OF(nvmi_special_cbs); ++i)
+	{
+		cbi = &nvmi_special_cbs[i];
+		if (0 != strcmp(name, cbi->name))
+		{
+			continue;
+		}
+
+		rc = nif_enable_monitor (kva, name, pre_instr_cb, post_instr_cb, cbi);
+		if (rc) {
+			fprintf (stderr, "Failed to add pg/bp for %s at %" PRIx64 "\n", name, kva);
+			goto exit;
+		}
+	}
+
+exit:
+
+	return rc;
+}
+
+static int
+handle_syscall (const char *name, addr_t kva)
+{
+	int rc = 0;
+	nvmi_cb_info_t * cbi = NULL;
+
+	static bool prediscovery = false;
+	static size_t nvmi_syscall_new = 0; // where to put new (incomplete) entries into table?
+
+	if (!prediscovery) {
+		prediscovery = true;
+		for (int i = 0; i < NUMBER_OF(nvmi_syscalls); ++i) {
+			if (strlen(nvmi_syscalls[i].name) > 0) {
+				++nvmi_syscall_new;
+			}
+		}
+	}
+
+	if (strncmp (name, "sys_", 4) &&
+	    strncmp (name, "sys_", 4) &&
+	    strncmp (name, "sys_", 4) )
+	{
+		// mismatch
+		rc = ENOENT;
+		goto exit;
+	}
+
+	// Skip these symbols: they are not syscalls
+	if (!strcmp(name,  "sys_call_table")          ||
+	    !strncmp(name, "sys_dmi", 7)              ||
+	    !strcmp(name,  "sys_tz")                  || /* used by gettimeofday */
+	    !strcmp(name,  "sys_tracepoint_refcount") ||
+	    !strcmp(name,  "sys_table")               ||
+	    !strcmp(name,  "sys_perf_refcount_enter") ||
+	    !strcmp(name,  "sys_perf_refcount_exit")  ||
+	    !strcmp(name,  "sys_reg_genericv8_init")    )
+	{
+		// mismatch
+		rc = ENOENT;
+		goto exit;
+	}
+
+	//
+	// We have a syscall
+	//
+	gstate.act_calls++;
+	if (gstate.act_calls == NVMI_MAX_SYSCALL_CT-1) { // max syscalls that we want to monitor
+		rc = ENOSPC;
+		fprintf (stderr, "Exceeding max allowed syscalls. Halting search.\n");
+		goto exit;
+	}
+
+	// We've found a syscall, and we have its address. Now, find it in our syscall table
+	for (int i = 0; i < nvmi_syscall_new; ++i) { //NUMBER_OF(nvmi_syscalls); ++i) {
+		if (!strcmp(name, nvmi_syscalls[i].name)) {
+			cbi = &nvmi_syscalls[i];
+			break;
+		}
+	}
+
+	// Now, with or without the syscall def, monitor this syscall
+	fprintf (stderr, "#%d: Monitoring symbol %s at %" PRIx64 "\n",
+		 gstate.act_calls, name, kva);
+
+	// Stage syscall dynamically; name only
+	if (NULL == cbi) {
+		fprintf (stderr, "\tdynamically adding symbol %s: no template found\n", name);
+		cbi = &nvmi_syscalls[nvmi_syscall_new++];
+		cbi->cb_type = NVMI_CALLBACK_SYSCALL;
+		cbi->enabled = true;
+		strncpy (cbi->name, name, SYSCALL_MAX_NAME_LEN);
+	}
+
+	if (!cbi->enabled) {
+		rc = ENOENT; // not quite right
+		goto exit;
+	}
+		
+	rc = nif_enable_monitor (kva, name, pre_instr_cb, post_instr_cb, cbi);
+	if (rc) {
+		fprintf (stderr, "Failed to add pg/bp for %s at %" PRIx64 "\n", name, kva);
+		goto exit;
+	}
+
+exit:
+	return rc;
+}
+
+
 // TODO: move to rekall
 // TODO: handle KASLR
 static int
 set_instrumentation_points (const char* mappath)
 {
 	FILE* input_file = NULL;
-	char* name = NULL;
 	char one_line[1024];
-	char* nl = NULL;
+	char * nl = NULL;
 	int rc = 0;
-	addr_t sys_va;
-	nvmi_syscall_def_t * sc = NULL;
-	size_t nvmi_syscall_new = 0; // where to put new (incomplete) entries into table?
 
 	input_file = fopen(mappath, "r+");
 	if (NULL == input_file) {
@@ -452,88 +685,166 @@ set_instrumentation_points (const char* mappath)
 		goto exit;
 	}
 
-	for (int i = 0; i < NUMBER_OF(nvmi_syscalls); ++i) {
-		if (strlen(nvmi_syscalls[i].name) > 0) {
-			++nvmi_syscall_new;
-		}
-	}
 	
-	while (fgets( one_line, 1000, input_file) != NULL) {
-		if (NULL == (name = strstr(one_line, " T "))) { //find the global text section symbols
-			//printf("\nDidn't find any text symbol");
-			continue;
-		}
+	while (fgets( one_line, sizeof(one_line), input_file) != NULL) {
+		char * name = NULL;
+		addr_t kva = 0;
 
-		// Doing this coz case insensitive function was behaving weirdly
-		if ((NULL == strstr(one_line, " sys_")) &&
-		    (NULL == strstr(one_line, " SyS_")) &&
-		    (NULL == strstr(one_line, " Sys_")))
-		{
+		// sample line: "ffffffff81033570 T sys_mmap\n"
+		name = strstr(one_line, " T ");
+		if (NULL == name) { // find the global text section symbols
 			continue;
 		}
-
-		// Skip these symbols: they are not syscalls
-		if (!strcmp(&name[4], "call_table") ||
-		    !strncmp(&name[4], "dmi", 3)              ||
-		    !strcmp(&name[4],  "tz")                  || /* used by gettimeofday */
-		    !strcmp(&name[4],  "tracepoint_refcount") ||
-		    !strcmp(&name[4],  "table")               ||
-		    !strcmp(&name[4],  "perf_refcount_enter") ||
-		    !strcmp(&name[4],  "perf_refcount_exit")  ||
-		    !strcmp(&name[4], "reg_genericv8_init")    ) {
-			continue;
-		}
-		
 		*name = '\0';
-		sys_va = (addr_t) strtoul(one_line, NULL, 16);
+		name += 3;
 
-		name = name + 3;
-		if (NULL != (nl =strchr(name, '\n')))
+		// overwrite EOL with NULL char
+		if (NULL != (nl = strchr(name, '\n')))
 			*nl='\0';
-		
-		sc = NULL;
-		// We've found a syscall, and we have its address. Now, find it in our syscall table
-		for (int i = 0; i < nvmi_syscall_new; ++i) { //NUMBER_OF(nvmi_syscalls); ++i) {
-			if (!strcmp(&name[4], nvmi_syscalls[i].name)) {
-				sc = &nvmi_syscalls[i];
-				break;
-			}
-		}
 
-		// Now, with or without the syscall def, monitor this syscall
-		fprintf (stderr, "#%d: Monitoring syscall %s at %" PRIx64 "\n",
-			 gstate.act_calls, name, sys_va);
-		// Stage syscall dynamically; name only
-		if (NULL == sc) {
-			fprintf (stderr, "\tdynamically adding syscall %s: no template found\n", name);
-			sc = &nvmi_syscalls[nvmi_syscall_new++];
-			sc->enabled = true;
-			strncpy (sc->name, name, NVMI_MAX_SYSCALL_NAME_LEN);
-		}
+		// line: "ffffffff81033570\0T sys_mmap\0"
+		kva = (addr_t) strtoul(one_line, NULL, 16);
 
-		if (!sc->enabled) {
+		//printf ("symbol: %s, addr %lx\n", name, kva);
+		//if (0 == strcmp("sys_sendmsg", name)) { __asm__("int $3");}
+
+		rc = handle_special_instr_point (name, kva);
+		if (0 == rc) { // success
 			continue;
-		}
-		
-		rc = nif_enable_monitor (sys_va, name, pre_instr_cb, post_instr_cb, sc);//&nvmi_syscalls[i]);
-		if (rc) {
-			fprintf (stderr, "Failed to add pg/bp for %s at %" PRIx64 "\n", name, sys_va);
+		} else if (ENOENT != rc) {
+			// failure for reason other than line mismatch
 			goto exit;
 		}
 
-		gstate.act_calls++;
-		if (gstate.act_calls == NVMI_MAX_SYSCALL_CT-1) { // max syscalls that we want to monitor
-			fprintf (stderr, "Exceeding max allowed syscalls. halting search.\n");
-			break;
+		// Otherwise, try to match with a syscall
+		rc = handle_syscall (name, kva);
+		if (0 == rc) { // success
+			continue;
+		} else if (ENOENT != rc) {
+			// failure for reason other than line mismatch
+			goto exit;
 		}
 	} // while
 
 	fprintf (stderr, "Found %d syscalls to monitor\n", gstate.act_calls);
+	rc = 0;
+
 exit:
 	if (NULL != input_file) {
 		fclose(input_file);
 	}
 
+	return rc;
+}
+
+
+static int
+handle_special_event (nvmi_event_t * evt)
+{
+	int rc = 0;
+	nvmi_cb_info_t * cbi = evt->cbi;
+
+	assert (cbi);
+	assert (cbi->cb_type == NVMI_CALLBACK_SPECIAL);
+
+	fprintf (stderr, "special event %s occurred\n", cbi->name);
+
+	if (cbi == &nvmi_special_cbs[NVMI_DO_EXIT_IDX]) {
+		// handle process destruction
+		fprintf (stderr, "exit of process pid %ld proc %s\n",
+			 evt->task->einfo.pid, evt->task->einfo.comm);
+
+		// we'll never see that again....
+		g_hash_table_remove (gstate.context_lookup, (gpointer) evt->task->key);
+	}
+	
+//exit:
+	return rc;
+}
+
+
+
+static int
+handle_syscall_event (nvmi_event_t * evt)
+{
+	int rc = 0;
+	nvmi_cb_info_t * cbi = evt->cbi;
+	char buf[1024] = {0};
+	char buf2[512];
+	
+	assert (cbi);
+	assert (cbi->cb_type == NVMI_CALLBACK_SYSCALL);
+
+	snprintf (buf, sizeof(buf), "syscall=%s(", cbi->name);
+
+//	fprintf (stderr, "syscall %s pid %ld proc %s\n",
+//		 cbi->name, evt->task->einfo.pid, evt->task->einfo.comm);
+
+	for (int i = 0; i < cbi->argct; ++i) {
+		reg_t val = evt->r.syscall_args[i];
+		//char * buf = NULL;
+
+		switch (cbi->args[i].type) {
+		case NVMI_ARG_TYPE_SCALAR:
+			//fprintf (stderr, "\targ %d: %lx\n", i+1, val);
+			snprintf (buf2, sizeof(buf2), " %lx,", val);
+			strncat (buf, buf2, sizeof(buf) - strlen(buf) - 1);
+			break;
+		case NVMI_ARG_TYPE_STR: // char *
+		{
+			const char * str = (const char *) &(evt->mem[ evt->mem_ofs[i]]);
+			if (strlen(str) > 0) {
+				snprintf (buf2, sizeof(buf2) - 1, " \"%s\",", str);
+				strncat (buf, buf2, sizeof(buf) - strlen(buf) - 1);
+			}
+			//fprintf (stderr, "\targ %d: %s\n", i+1, str);
+		}
+		break;
+		case NVMI_ARG_TYPE_SA: {
+#if 0
+			struct addrinfo_in6 ai;
+			struct addrinfo *res;
+
+			status = vmi_read_va (vmi,
+					      val,
+					      evt->task->pid,
+					      sizeof(ai),
+					      &ai,
+					      NULL);
+			if (VMI_FAILURE == status ) {
+				fprintf (stderr, "Failed to read addrinfo struct\n");
+				continue;
+			}
+
+			rc = getaddrinfo (NULL, NULL, (const struct addrinfo *) &ai, &res);
+			if (rc) {
+				fprintf (stderr, "Failed to decode addrinfo struct\n");
+				continue;
+			}
+
+			//printf ("\targ %d: %s\n", i+1, res->ai_cannonname);
+			freeaddrinfo (res);
+#endif
+		}
+			break;
+		default:
+			break;
+		} // switch
+	} // for
+
+#if defined(ARM64)
+	snprintf (buf2, sizeof(buf2), ")	proc=%s	pid=%ld	 TTBR0=%" PRIx32 "	TTBR1=%" PRIx32 "",
+		  evt->task->einfo.comm, evt->task->einfo.pid, evt->r.arch.arm64.ttbr0, evt->r.arch.arm64.ttbr1);
+#else
+	snprintf (buf2, sizeof(buf2), ")	proc=%s		pid=%ld		CR3=%" PRIx64 "",
+		  evt->task->einfo.comm, evt->task->einfo.pid, evt->r.arch.intel.cr3);
+#endif
+
+	strncat (buf, buf2, sizeof(buf) - strlen(buf) - 1);
+
+	fprintf (stderr, "%s\n", buf);
+
+//exit:
 	return rc;
 }
 
@@ -546,7 +857,7 @@ static gpointer
 nvmi_event_consumer (gpointer data)
 {
 	gpointer rv = NULL;
-	nvmi_syscall_def_t * sc = NULL;
+	nvmi_cb_info_t * cbi = NULL;
 
 	int rc = 0;
 
@@ -554,78 +865,38 @@ nvmi_event_consumer (gpointer data)
 	g_async_queue_ref (gstate.event_queue); 
 
 	// Monitor gstate.interrupted
-	while (true) {
+	while (!gstate.interrupted) {
 		nvmi_event_t * evt = (nvmi_event_t *)
 			g_async_queue_timeout_pop (gstate.event_queue, NVMI_EVENT_QUEUE_TIMEOUT_uS);
 		if (NULL == evt) {
 			// Nothing in queue. Is it time to return yet?
-			if (!gstate.interrupted) {
-				continue;
-			}
-			// otherwise, give up!
-			goto exit;
+			continue;
 		}
 
 		// Process the event
 		assert (evt);
-		assert (evt->sc);
+		assert (evt->cbi);
+		cbi = evt->cbi;
 
-		sc = evt->sc;
-
-		fprintf (stderr, "syscall %s pid %ld proc %s\n",
-			 sc->name, evt->task->einfo.pid, evt->task->einfo.comm);
-
-		for (int i = 0; i < sc->argct; ++i) {
-			reg_t val = evt->r.syscall_args[i];
-			char * buf = NULL;
-
-			switch (sc->args[i].type) {
-			case NVMI_ARG_TYPE_SCALAR:
-				fprintf (stderr, "\targ %d: %lx\n", i+1, val);
-				break;
-			case NVMI_ARG_TYPE_STR: // char *
-				fprintf (stderr, "\targ %d: %s\n", i+1, (char *) &(evt->mem[ evt->mem_ofs[i]] ));
-				break;
-			case NVMI_ARG_TYPE_SA: {
-#if 0
-				struct addrinfo_in6 ai;
-				struct addrinfo *res;
-
-				status = vmi_read_va (vmi,
-						      val,
-						      evt->task->pid,
-						      sizeof(ai),
-						      &ai,
-						      NULL);
-				if (VMI_FAILURE == status ) {
-					fprintf (stderr, "Failed to read addrinfo struct\n");
-					continue;
-				}
-
-				rc = getaddrinfo (NULL, NULL, (const struct addrinfo *) &ai, &res);
-				if (rc) {
-					fprintf (stderr, "Failed to decode addrinfo struct\n");
-					continue;
-				}
-
-				printf ("\targ %d: %s\n", i+1, res->ai_cannonname);
-				freeaddrinfo (res);
-#endif
-			}
-				break;
-			default:
-				break;
-			} // switch
-		} // for
-
+		switch (cbi->cb_type)
+		{
+		case NVMI_CALLBACK_SPECIAL:
+			rc = handle_special_event (evt);
+			break;
+		case NVMI_CALLBACK_SYSCALL:
+			rc = handle_syscall_event (evt);
+			break;
+		default:
+			break;
+		}
+		
 		// destroy the event: TODO - fix refct mismanagement!!
+		//		deref_task_context ((gpointer)&evt->task);
+		//		__sync_fetch_and_sub (&evt->task->refct, 1);
 
-//		deref_task_context ((gpointer)&evt->task);
-
-//		__sync_fetch_and_sub (&evt->task->refct, 1);
-
+		deref_task_context ((gpointer) evt->task);
 		g_slice_free (nvmi_event_t, evt);
-	}
+	} // while
 
 exit:
 	g_async_queue_unref (gstate.event_queue); 
@@ -662,7 +933,7 @@ nvmi_main_init (void)
 	gstate.context_lookup = g_hash_table_new_full (NULL, // hash
 						       NULL, // key equal
 						       NULL, // key destroy
-						       NULL); // val destroy -- IMPLEMENT ME!
+						       deref_task_context); // val destroy -- IMPLEMENT ME!
 	
 	status |= vmi_get_offset (vmi, "linux_name", &gstate.task_name_ofs);
 	status |= vmi_get_offset (vmi, "linux_pid",  &gstate.task_pid_ofs);
@@ -675,7 +946,15 @@ nvmi_main_init (void)
 	}
 	assert (gstate.task_name_ofs &&
 		gstate.task_pid_ofs   );
-
+/*
+	status = vmi_translate_ksym2v(vmi, "exit_mmap", &gstate.va_exit_mmap);
+	if (VMI_FAILURE == status) {
+		rc = EIO;
+		fprintf(stderr, "Error could get the current_task offset.\n");
+		goto exit;
+	}
+*/
+	
 #if !defined(ARM64)
 	status = vmi_translate_ksym2v(vmi, "per_cpu__current_task", &gstate.va_current_task);
 	if (VMI_FAILURE == status) {

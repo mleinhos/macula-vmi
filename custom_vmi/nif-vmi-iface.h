@@ -22,12 +22,6 @@
 #include <xenctrl.h>
 #include <glib.h>
 
-#define MAX_VCPUS 8
-#define MAX_CALLS 400
-#define MAX_SNAME_LEN 128
-#define PG_OFFSET_BITS 12
-#define DOM_PAGE_SIZE (1 << PG_OFFSET_BITS)
-
 /**
  * Callback received by monitoring layer: it can observe the event but
  * cannot influence the response performed by the underlying layer.

@@ -19,7 +19,10 @@
 // General defs
 #define PROCESS_MAX_COMM_NAME 32 // max len of comm field in task_struct
 #define PROCESS_MAX_PATH 128
+
+#define SYSCALL_MAX_NAME_LEN 32
 #define SYSCALL_MAX_ARGS 6
+#define SOCKADDR_MAX_LEN 64 // TODO: get sizeof(struct sockaddr_in6)
 
 #define NVMI_STRUCT_ATTRIBS __attribute__((packed))
 
@@ -46,15 +49,15 @@ typedef struct _timeval {
 
 typedef struct _sock_addr {
     uint16_t family;
-    uint8_t  data[14];
+    uint8_t  data[SOCKADDR_MAX_LEN];
 } NVMI_STRUCT_ATTRIBS sock_addr_t;
 
 
 enum event_types {
     EVENT_TYPE_NONE = 0,
     EVENT_TYPE_SYSCALL = 1,
-    EVENT_TYPE_PROCESS_CREATE = 2,
-    EVENT_TYPE_PROCESS_DEATH = 3,
+    EVENT_TYPE_PROCESS_CREATE = 2, // process created, or first observed
+    EVENT_TYPE_PROCESS_DEATH = 3, // process died (do_exit called)
     EVENT_TYPE_FILE_CREATION = 4,
 };
 
@@ -66,7 +69,6 @@ typedef uint8_t event_type_t;
 //
 
 typedef struct _process_creation_event {
-    uint64_t pdb; // page directory base
     uint64_t uid;
     uint64_t gid;
     uint64_t pid;
@@ -105,20 +107,17 @@ enum syscall_numbers {
 
 typedef uint32_t syscall_number_t;
 
-enum syscall_arg_types {
+enum syscall_arg_type {
     // Scalar types: values held in syscall event's args
     SYSCALL_ARG_TYPE_NONE   = 0,
-    SYSCALL_ARG_TYPE_INT    = 1, // includes bool, short, and int; signed and unsigned
-    SYSCALL_ARG_TYPE_LONG   = 2, // large enough to hold address, maybe merge with int?
-    SYSCALL_ARG_TYPE_CHAR   = 3, // one char
-    SYSCALL_ARG_TYPE_PVOID  = 4, // void *
+    SYSCALL_ARG_TYPE_SCALAR = 1, // includes bool, short, and int; signed and unsigned
+    SYSCALL_ARG_TYPE_PVOID  = 2, // void * - a pointer, but not dereferenced
 
     // Array types: values held in syscall event's data 
-    SYSCALL_ARG_TYPE_PCHAR    = 20, // char *
-    SYSCALL_ARG_TYPE_WCHAR    = 21, // one wide char
-    SYSCALL_ARG_TYPE_PWCHAR   = 22, // wchar *
-    SYSCALL_ARG_TYPE_SOCKADDR = 23, // sock_addr_t *
-};
+    SYSCALL_ARG_TYPE_STR      = 20, // char *
+    SYSCALL_ARG_TYPE_WSTR     = 21, // one wide char
+    SYSCALL_ARG_TYPE_SOCKADDR = 22, // sock_addr_t *, resolved
+}; // syscall_arg_type_t;
 
 typedef uint8_t syscall_arg_type_t;
 
