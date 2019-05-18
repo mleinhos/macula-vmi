@@ -43,7 +43,9 @@
 
 #define NVMI_EVENT_QUEUE_TIMEOUT_uS (5 * 1000)
 
-#define NVMI_KSTACK_MASK (~0x1fff) // 8k stack
+//#define NVMI_KSTACK_MASK (~0xfff)  // 1 pg stack
+//#define NVMI_KSTACK_MASK (~0x1fff) // 2 pg stack
+#define NVMI_KSTACK_MASK (~0x3fff) // 4 pg stack
 
 #define ZMQ_EVENT_CHANNEL "tcp://*:5555"
 #define ZMQ_REQUEST_CHANNEL "tcp://localhost:5556"
@@ -106,22 +108,11 @@ typedef struct _nvmi_state {
 
 static nvmi_state_t gstate = {0};
 
-typedef unsigned long atomic_t;
-
-static inline atomic_t atomic_inc (atomic_t * val)
-{
-	return __sync_add_and_fetch (val, 1);
-}
-
-static inline atomic_t atomic_dec (atomic_t * val)
-{
-	return __sync_sub_and_fetch (val, 1);
-}
-
 
 static void
 close_handler(int sig)
 {
+	fprintf (stderr, "Received signal %d, shutting down\n", sig);
 	gstate.interrupted = true;
 	nif_stop();
 }
@@ -135,6 +126,7 @@ pre_gather_registers (vmi_instance_t vmi,
 {
 	int rc = 0;
 	status_t status = VMI_SUCCESS;
+	reg_t x[8];
 
 	for (int i = 0; i < argct; ++i) {
 		status_t status = vmi_get_vcpureg (vmi,
@@ -149,10 +141,16 @@ pre_gather_registers (vmi_instance_t vmi,
 
 	// Get the rest of the context too, for context lookup. Beware KPTI!!
 #if defined(ARM64)
-	status  = vmi_get_vcpureg (vmi, &regs->arch.arm64.ttbr0, TTBR0, event->vcpu_id);
-	status |= vmi_get_vcpureg (vmi, &regs->arch.arm64.ttbr1, TTBR1, event->vcpu_id);
-	status |= vmi_get_vcpureg (vmi, &regs->arch.arm64.sp,   SP_USR, event->vcpu_id);
+	status  = vmi_get_vcpureg (vmi, &regs->arch.arm64.ttbr0,  TTBR0,  event->vcpu_id);
+	status |= vmi_get_vcpureg (vmi, &regs->arch.arm64.ttbr1,  TTBR1,  event->vcpu_id);
+	status |= vmi_get_vcpureg (vmi, &regs->arch.arm64.sp,     SP_USR, event->vcpu_id);
 	status |= vmi_get_vcpureg (vmi, &regs->arch.arm64.sp_el0, SP_EL0, event->vcpu_id);
+
+	for (int i = 0; i < NUMBER_OF(x); ++i) {
+		(void) vmi_get_vcpureg (vmi, &x[i], R0+i, event->vcpu_id);
+		fprintf (stderr, "R%d = 0x%lx\n", x[i]);
+	}
+	
 	/*
 	fprintf (stderr, "context: ttbr0   = %lx\n", regs->arch.arm64.ttbr0);
 	fprintf (stderr, "context: ttbr1   = %lx\n", regs->arch.arm64.ttbr1);
@@ -160,9 +158,9 @@ pre_gather_registers (vmi_instance_t vmi,
 	fprintf (stderr, "context: sp      = %lx\n", regs->arch.arm64.sp);
 	*/
 #else
-	status  = vmi_get_vcpureg (vmi, &regs->arch.intel.cr3, CR3,     event->vcpu_id);
-	status |= vmi_get_vcpureg (vmi, &regs->arch.intel.sp,  RSP,     event->vcpu_id);
-	status |= vmi_get_vcpureg (vmi, &regs->arch.intel.gs_base,  GS_BASE, event->vcpu_id);
+	status  = vmi_get_vcpureg (vmi, &regs->arch.intel.cr3,     CR3,     event->vcpu_id);
+	status |= vmi_get_vcpureg (vmi, &regs->arch.intel.sp,      RSP,     event->vcpu_id);
+	status |= vmi_get_vcpureg (vmi, &regs->arch.intel.gs_base, GS_BASE, event->vcpu_id);
 #endif
 	if (VMI_SUCCESS != status) {
 		rc = EFAULT;
@@ -349,9 +347,55 @@ read_memory (vmi_instance_t vmi,
 	addr_t pa = 0;
 	bool read_more = true;
 	char * str = NULL;
-	addr_t pdb = 0;
+	addr_t dtb = 0;
+	char buf[32] = {0};
+	size_t sz = 0;
+	
+		// FIXME: fix user mem deref on ARM
+	// TODO: clear out v2p cache prior to translation
 
-#if defined(X86_64)
+	status = vmi_pid_to_dtb (vmi, evt->task->einfo.pid, &dtb);
+	if (VMI_FAILURE == status) {
+		rc = EIO;
+		fprintf(stderr, "Error could get DTB for pid %ld\n", evt->task->einfo.pid);
+		goto exit;
+	}
+
+	fprintf (stderr, "PID %d --> DTB %lx\n", evt->task->einfo.pid, dtb);
+
+	//vmi_v2pcache_flush (vmi, dtb);
+	vmi_v2pcache_flush (vmi,  ~0ull);
+	
+	access_context_t ctx = { .translate_mechanism = VMI_TM_PROCESS_DTB,
+				 //.dtb = dtb,
+				  .dtb = evt->r.arch.arm64.ttbr0,
+				 .addr = va };
+	// better to read directly into caller buffer
+
+/*
+//	str = vmi_read_str(vmi, &ctx);
+//	if (VMI_FAILURE == status) {
+	if (NULL == str) {
+		rc = EIO;
+		fprintf(stderr, "Error could get PA from VA %" PRIx64 ".\n", va);
+		goto exit;
+	}
+*/
+
+	status = vmi_read (vmi, &ctx, sizeof(buf), buf, &sz);
+	if (VMI_FAILURE == status) {
+		rc = EIO;
+		fprintf(stderr, "Error could read memory from VA %" PRIx64 ".\n", va);
+		goto exit;
+	}
+
+	fprintf (stderr, "Read string '%s' from memory\n", buf);
+	str = strdup ("junk");
+
+	
+	goto exit;
+	
+#if defined(X86_64) // INTEL
 
 #  if 1 // x86: works
 	str = vmi_read_str_va (vmi, va, evt->task->einfo.pid);
@@ -363,20 +407,20 @@ read_memory (vmi_instance_t vmi,
 #  endif
 
 #  if 0 // x86: works
-	status = vmi_pid_to_dtb (vmi, evt->task->einfo.pid, &pdb);
+	status = vmi_pid_to_dtb (vmi, evt->task->einfo.pid, &dtb);
 	if (VMI_FAILURE == status) {
 		rc = EIO;
-		fprintf(stderr, "Error could get PDB for pid %ld\n", evt->task->einfo.pid);
+		fprintf(stderr, "Error could get DTB for pid %ld\n", evt->task->einfo.pid);
 		goto exit;
 	}
 	
 	access_context_t ctx = { .translate_mechanism = VMI_TM_PROCESS_DTB,
-				 .dtb = pdb,
+				 .dtb = dtb,
 /*
   #if defined(ARM64)
   .dtb = evt->r.arch.arm64.ttbr1,
   #else
-  .dtb = evt->r.arch.intel.updb,
+  .dtb = evt->r.arch.intel.udtb,
   #endif
 */
 				 .addr = va };
@@ -393,13 +437,10 @@ read_memory (vmi_instance_t vmi,
 //	status = vmi_read_va (vmi, va, evt->r.ttbr1)
 #  endif
 	
-	fprintf (stderr, "Successfully read string '%s' from mem (%lx pid %lx)\n",
-		 str, va, evt->task->einfo.pid);
+//	fprintf (stderr, "Successfully read string '%s' from mem (%lx pid %lx)\n",
+//		 str, va, evt->task->einfo.pid);
 	
-#else
-	// FIXME: fix user mem deref on ARM
-	// TODO: clear out v2p cache prior to translation
-	str = strdup("<string value>");
+#else // ARM
 #endif
 	
 exit:
@@ -777,12 +818,8 @@ handle_syscall_event (nvmi_event_t * evt)
 
 	snprintf (buf, sizeof(buf), "syscall=%s(", cbi->name);
 
-//	fprintf (stderr, "syscall %s pid %ld proc %s\n",
-//		 cbi->name, evt->task->einfo.pid, evt->task->einfo.comm);
-
 	for (int i = 0; i < cbi->argct; ++i) {
 		reg_t val = evt->r.syscall_args[i];
-		//char * buf = NULL;
 
 		switch (cbi->args[i].type) {
 		case NVMI_ARG_TYPE_SCALAR:
@@ -790,8 +827,7 @@ handle_syscall_event (nvmi_event_t * evt)
 			snprintf (buf2, sizeof(buf2), " %lx,", val);
 			strncat (buf, buf2, sizeof(buf) - strlen(buf) - 1);
 			break;
-		case NVMI_ARG_TYPE_STR: // char *
-		{
+		case NVMI_ARG_TYPE_STR: { // char *
 			const char * str = (const char *) &(evt->mem[ evt->mem_ofs[i]]);
 			if (strlen(str) > 0) {
 				snprintf (buf2, sizeof(buf2) - 1, " \"%s\",", str);
@@ -799,7 +835,7 @@ handle_syscall_event (nvmi_event_t * evt)
 			}
 			//fprintf (stderr, "\targ %d: %s\n", i+1, str);
 		}
-		break;
+			break;
 		case NVMI_ARG_TYPE_SA: {
 #if 0
 			struct addrinfo_in6 ai;
@@ -839,7 +875,6 @@ handle_syscall_event (nvmi_event_t * evt)
 	snprintf (buf2, sizeof(buf2), ")	proc=%s		pid=%ld		CR3=%" PRIx64 "",
 		  evt->task->einfo.comm, evt->task->einfo.pid, evt->r.arch.intel.cr3);
 #endif
-
 	strncat (buf, buf2, sizeof(buf) - strlen(buf) - 1);
 
 	rc = zmq_send (gstate.zmq_event_socket, buf, strlen(buf)+1, 0);
@@ -867,7 +902,6 @@ nvmi_event_consumer (gpointer data)
 	int rc = 0;
 
 	fprintf (stderr, "Begining event consumer loop\n");
-	g_async_queue_ref (gstate.event_queue); 
 
 	// Monitor gstate.interrupted
 	while (!gstate.interrupted) {
@@ -904,7 +938,9 @@ nvmi_event_consumer (gpointer data)
 	} // while
 
 exit:
-	g_async_queue_unref (gstate.event_queue); 
+	fprintf (stderr, "Completed event consumer loop\n");
+	zmq_close (gstate.zmq_event_socket);
+	gstate.zmq_event_socket = NULL;
 	return NULL;
 }
 
@@ -914,12 +950,18 @@ nvmi_main_fini (void)
 	if (gstate.consumer_thread) {
 		g_thread_join (gstate.consumer_thread);
 	}
-	if (gstate.context_lookup) {
-		g_hash_table_destroy (gstate.context_lookup);
-	}
+	fprintf (stderr, "Consumer thread joined\n");
+
+	// releasing queue causes event consumer to return
 	if (gstate.event_queue) {
 		g_async_queue_unref (gstate.event_queue);
 	}
+	fprintf (stderr, "Event queue dereferenced\n");
+
+	if (gstate.context_lookup) {
+		g_hash_table_destroy (gstate.context_lookup);
+	}
+	fprintf (stderr, "Context lookup table destroyed\n");
 }
 
 static int
@@ -986,23 +1028,13 @@ comms_request_servicer (gpointer data)
 {
     int rc = 0;
 
-    void* subscriber = zmq_socket (gstate.zmq_context, ZMQ_PAIR);
-    if (NULL == subscriber) {
-        rc = zmq_errno();
-        fprintf(stderr, "zmq_socket() failed");
-        goto exit;
-    }
-
-    zmq_connect (subscriber, ZMQ_REQUEST_CHANNEL);
-
     while (!gstate.interrupted) {
         char msg[30] = {0};
         vmi_pid_t pid = -1;
 
-	rc = zmq_recv (subscriber, msg, sizeof(msg), 0);
+	rc = zmq_recv (gstate.zmq_request_socket, msg, sizeof(msg), 0);
         if (rc <= 0) {
-            fprintf (stderr, "Received empty string. All done.\n");
-            break;
+		break;
         }
     
         //
@@ -1018,24 +1050,32 @@ comms_request_servicer (gpointer data)
     }
 
 exit:
+    fprintf (stderr, "Shutting down request socket\n");
+    zmq_close (gstate.zmq_request_socket);
+    gstate.zmq_request_socket = NULL;
+
     return NULL;
 }
 
 static void
 comms_fini(void)
 {
+	if (gstate.zmq_context) {
+		zmq_ctx_shutdown (gstate.zmq_context);
+		zmq_ctx_destroy (gstate.zmq_context);
+	}
+	
 	if (gstate.zmq_event_socket)  zmq_close (gstate.zmq_event_socket);
-	if (gstate.zmq_context) zmq_ctx_destroy (gstate.zmq_context);
+	if (gstate.zmq_request_socket)  zmq_close (gstate.zmq_request_socket);
 
 	if (gstate.request_service_thread) {
 		g_thread_join (gstate.request_service_thread);
 	}
 
-	if (gstate.zmq_request_socket)  zmq_close (gstate.zmq_request_socket);
-
 	gstate.zmq_context = NULL;
 	gstate.zmq_event_socket  = NULL;
 	gstate.zmq_request_socket  = NULL;
+	fprintf (stderr, "Comms shutdown\n");
 }
 
 static int
@@ -1060,6 +1100,19 @@ comms_init(void)
 	rc = zmq_bind (gstate.zmq_event_socket, ZMQ_EVENT_CHANNEL);
 	if (rc) {
 		fprintf (stderr, "zmq_connect(" ZMQ_EVENT_CHANNEL ") failed: %d\n", rc);
+		goto exit;
+	}
+
+	gstate.zmq_request_socket = zmq_socket (gstate.zmq_context, ZMQ_PAIR);
+	if (NULL == gstate.zmq_request_socket) {
+		rc = zmq_errno();
+		fprintf(stderr, "zmq_socket() failed: %d\n", rc);
+		goto exit;
+	}
+
+	rc = zmq_connect (gstate.zmq_request_socket, ZMQ_REQUEST_CHANNEL);
+	if (rc) {
+		fprintf (stderr, "zmq_connect(" ZMQ_REQUEST_CHANNEL ") failed: %d\n", rc);
 		goto exit;
 	}
 
@@ -1108,7 +1161,7 @@ main (int argc, char* argv[])
 	if (rc) {
 		goto exit;
 	}
-	
+
 	rc = set_instrumentation_points (argv[2]);
 	if (rc) {
 		goto exit;
@@ -1121,10 +1174,12 @@ main (int argc, char* argv[])
 
 exit:
 	gstate.interrupted = true;
+
 	nif_stop();
 	nif_fini();
+
 	nvmi_main_fini();
 	comms_fini();
-
+	fprintf (stderr, "Main completed\n");
 	return rc;
 }

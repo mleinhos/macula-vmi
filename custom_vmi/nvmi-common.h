@@ -37,4 +37,19 @@
 #    define MAX(x,y) ((x) < (y) ? (x) : (y))
 #endif
 
+
+typedef unsigned long atomic_t;
+
+static inline atomic_t atomic_inc (atomic_t * val)
+{
+	return __sync_add_and_fetch (val, 1);
+}
+
+static inline atomic_t atomic_dec (atomic_t * val)
+{
+	return __sync_sub_and_fetch (val, 1);
+}
+
+
+
 #endif // NVMI_COMMON_DEFS_H

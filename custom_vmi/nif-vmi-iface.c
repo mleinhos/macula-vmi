@@ -36,6 +36,8 @@
 #include <glib.h>
 #include <assert.h>
 
+#include <semaphore.h>
+
 typedef uint16_t p2m_view_t;
 #define ALTP2M_INVALID_VIEW (p2m_view_t)(~0)
 
@@ -75,6 +77,9 @@ typedef struct {
 
 	GHashTable* shadow_pnode_mappings; //key:shadow
 
+//	sem_t shutdown_complete;
+	bool loop_running;
+
 } nif_xen_monitor; // To avoid double pointers
 
 // Track one page containing instrumentation point
@@ -82,7 +87,6 @@ typedef struct nif_page_node {
 	addr_t		frame;
 	addr_t		shadow_frame;
 	GHashTable* 	offset_bp_mappings; // key:offset
-//	nif_xen_monitor	*xa;
 } nif_page_node;
 
 // Track one hook (instrumentation point)
@@ -103,42 +107,46 @@ typedef struct nif_hook_node {
 
 static nif_hook_node* vcpu_hook_nodes[MAX_VCPUS];
 
-
 static nif_xen_monitor xa;
 
 static inline status_t
 write_trap_val_va (vmi_instance_t vmi, addr_t va, trap_val_t val)
 {
+	return vmi_write_va (vmi, va, 0, sizeof(trap_val_t), &val, NULL);
+/*
 #if defined(ARM64)
 	return vmi_write_32_va (vmi, va, 0, &val);
-	//return vmi_write_va (vmi, va, 0, sizeof(trap_val_t), &val, NULL);
 #else
 	return vmi_write_8_va (vmi, va, 0, &val);
 #endif
+*/
 }
 
 static inline status_t
 write_trap_val_pa (vmi_instance_t vmi, addr_t pa, trap_val_t val)
 {
-//	return vmi_write_pa (vmi, pa, sizeof(trap_val_t), &val, NULL);
+	return vmi_write_pa (vmi, pa, sizeof(trap_val_t), &val, NULL);
+/*
 #if defined(ARM64)
 	return vmi_write_32_pa (vmi, pa, &val);
 #else
 	return vmi_write_8_pa (vmi, pa, &val);
 #endif
-
+*/
 }
 
 static inline status_t
 read_trap_val_va (vmi_instance_t vmi, addr_t va, trap_val_t* val)
 {
-//	return vmi_read_va (vmi, va, 0, sizeof(trap_val_t), val, NULL);
+	return vmi_read_va (vmi, va, 0, sizeof(trap_val_t), val, NULL);
+/*
 #if defined(ARM64)
 	return vmi_read_32_va (vmi, va, 0, val);
 	//return vmi_write_va (vmi, va, 0, sizeof(trap_val_t), &val, NULL);
 #else
 	return vmi_read_8_va (vmi, va, 0, val);
 #endif
+*/
 }
 
 
@@ -169,13 +177,21 @@ free_pg_hks_lst (gpointer data)
 static event_response_t
 _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 {
-	nif_page_node* pgnode_temp = NULL;
+	nif_page_node* pgnode = NULL;
 	nif_hook_node* hook_node = NULL;
 	addr_t shadow = 0;
 
 	if (event->slat_id == 0) { // SW SINGLE STEP
 		event->slat_id = alt_view1;
 		// TODO: track post CBs on a per-vcpu basis and call appropriate one
+#if 0
+		hook_node = vcpu_hook_nodes [event->vcpu_id];
+		if (NULL != hook_node) {
+			if (hook_node->post_cb) {
+				hook_node->post_cb (hook_node->cb_arg);
+			}
+		}
+#endif
 		return (VMI_EVENT_RESPONSE_VMM_PAGETABLE_ID);
 	}
 
@@ -189,14 +205,14 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 		return VMI_EVENT_RESPONSE_NONE;
 	}
 
-	pgnode_temp = g_hash_table_lookup (xa.shadow_pnode_mappings,
+	pgnode = g_hash_table_lookup (xa.shadow_pnode_mappings,
 					   GSIZE_TO_POINTER(shadow));
-	if (NULL == pgnode_temp) {
+	if (NULL == pgnode) {
 		fprintf(stderr, "Can't find pg_node for shadow: %" PRIx64 "\n", shadow);
 		return VMI_EVENT_RESPONSE_NONE;
 	}
 
-	hook_node = g_hash_table_lookup (pgnode_temp->offset_bp_mappings,
+	hook_node = g_hash_table_lookup (pgnode->offset_bp_mappings,
 					 GSIZE_TO_POINTER(event->privcall_event.offset));
 	if (NULL == hook_node) {
 		fprintf (stderr, "Warning: No BP record found for this offset %" PRIx64 " on page %" PRIx16 "",
@@ -228,7 +244,7 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 static event_response_t
 _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 {
-	nif_page_node* pgnode_temp = NULL;
+	nif_page_node* pgnode = NULL;
 	nif_hook_node* hook_node = NULL;
 	addr_t shadow = 0;
 
@@ -242,14 +258,14 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 		return VMI_EVENT_RESPONSE_NONE;
 	}
 
-	pgnode_temp = g_hash_table_lookup(xa.shadow_pnode_mappings,
+	pgnode = g_hash_table_lookup(xa.shadow_pnode_mappings,
 					  GSIZE_TO_POINTER(shadow));
-	if (NULL == pgnode_temp) {
+	if (NULL == pgnode) {
 		fprintf(stderr, "Can't find pg_node for shadow: %" PRIx64 "\n", shadow);
 		return VMI_EVENT_RESPONSE_NONE;
 	}
 
-	hook_node = g_hash_table_lookup(pgnode_temp->offset_bp_mappings,
+	hook_node = g_hash_table_lookup(pgnode->offset_bp_mappings,
 					GSIZE_TO_POINTER(event->interrupt_event.offset));
 	if (NULL == hook_node) {
 		fprintf(stderr, "No hook record found for this offset %" PRIx64 " on page %" PRIx64 "\n",
@@ -577,17 +593,21 @@ mem_intchk_cb (vmi_instance_t vmi, vmi_event_t* event)
 #endif
 
 
-static void clean_xen_monitor(void)
+static void fini_xen_monitor(void)
 {
-	if (xa.xcx)
-		if (0 != libxl_ctx_free(xa.xcx))
+	if (xa.xcx) {
+		if (0 != libxl_ctx_free(xa.xcx)) {
 			fprintf(stderr,"Failed to close xl handle\n");
+		}
+		xa.xcx = NULL;
+	}
 
-	if (xa.xci)
-		if (0!= xc_interface_close(xa.xci))
+	if (xa.xci) {
+		if (0 != xc_interface_close(xa.xci)) {
 			fprintf(stderr,"Failed to close connection to xen interface\n");
-
-//	xc_domain_setmaxmem(xa->xci, xa->domain_id, xa->orig_mem_size);
+		}
+		xa.xci = NULL;
+	}
 }
 
 
@@ -597,19 +617,19 @@ static void destroy_views(uint32_t domain_id)
 		return;
 	}
 
-	if (0!= xc_altp2m_switch_to_view(xa.xci, domain_id, 0))
+	if (0 != xc_altp2m_switch_to_view(xa.xci, domain_id, 0))
 		fprintf(stderr,"Failed to switch to exe view in func destroy_view\n");
 
-	if (alt_view1 )
+	if (alt_view1)
 		xc_altp2m_destroy_view(xa.xci, domain_id, alt_view1);
 
-	if (0!= xc_altp2m_set_domain_state(xa.xci, domain_id, 0))
+	if (0 != xc_altp2m_set_domain_state(xa.xci, domain_id, 0))
 		fprintf(stderr,"Failed to disable alternate view for domain_id: %u\n",domain_id);
 }
 
 
 static int
-inst_xen_monitor(const char* name)
+init_xen_monitor(const char* name)
 {
 	int rc = 0;
 	if (0 == (xa.xci = xc_interface_open(NULL, NULL, 0))) {
@@ -636,8 +656,6 @@ inst_xen_monitor(const char* name)
 		goto clean;
 	}
 
-
-
 	if (xc_domain_maximum_gpfn(xa.xci, xa.domain_id, &xa.max_gpfn) < 0) {
 		rc = EIO;
 		fprintf(stderr,"Failed to get max gpfn for the domain\n");
@@ -648,26 +666,34 @@ inst_xen_monitor(const char* name)
 	return 0;
 
 clean:
-	clean_xen_monitor();
+	fini_xen_monitor();
 	return rc;
 }
 
 void
 nif_fini(void)
 {
+	fprintf (stderr, "Waiting for Xen event loop to shut down...\n");
+	while (xa.loop_running) {
+		usleep (5);
+	}
+	fprintf (stderr, "Xen event loop has shut down...\n");
+	
 	vmi_pause_vm(xa.vmi);
 
-	fflush(stdout);
-	g_hash_table_destroy(xa.shadow_pnode_mappings);
-	g_hash_table_destroy(xa.pframe_sframe_mappings);
+	fflush (stdout);
+	g_hash_table_destroy (xa.shadow_pnode_mappings);
+	g_hash_table_destroy (xa.pframe_sframe_mappings);
 
 	destroy_views(xa.domain_id);
 
-	clean_xen_monitor();
+	fini_xen_monitor();
 
 	vmi_resume_vm(xa.vmi);
 
 	vmi_destroy(xa.vmi);
+
+//	sem_destroy (&xa.shutdown_complete);
 }
 
 int
@@ -676,6 +702,9 @@ nif_init(const char* name)
 	vmi_event_t trap_event, mem_event, cr3_event;
 	status_t status;
 	int rc = 0;
+
+	// Not in event loop yet...
+	xa.loop_running = false;
 
 	// Initialize the libvmi library.
 	if (VMI_FAILURE ==
@@ -686,32 +715,37 @@ nif_init(const char* name)
 		goto exit;
 	}
 
-	rc = inst_xen_monitor(name);
+	rc = init_xen_monitor(name);
 	if (rc) {
 		goto exit;
 	}
 
 	fprintf(stderr,"\n\t\t\tNumen Introspection Framework v2.0\n\n");
 
-	xa.pframe_sframe_mappings = g_hash_table_new(NULL, NULL);
-	xa.shadow_pnode_mappings = g_hash_table_new_full(NULL, NULL,NULL,free_nif_page_node);
-
+	xa.pframe_sframe_mappings = g_hash_table_new (NULL, NULL);
+	xa.shadow_pnode_mappings = g_hash_table_new_full (NULL, NULL, NULL, free_nif_page_node);
+/*	rc = sem_init (&xa.shutdown_complete, 0, 0);
+	if (rc) {
+		fprintf (stderr, "sem_init() failed\n");
+		goto exit;
+	}
+*/	
 	vmi_pause_vm(xa.vmi);
 
-	if (0!= xc_altp2m_set_domain_state(xa.xci, xa.domain_id, 1)) {
+	if (0 != xc_altp2m_set_domain_state(xa.xci, xa.domain_id, 1)) {
 		rc = EIO;
 		fprintf(stderr,"Failed to enable altp2m for domain_id: %u\n", xa.domain_id);
 		goto exit;
 	}
 
-	if (0!= xc_altp2m_create_view(xa.xci, xa.domain_id, 0, &alt_view1)) {
+	if (0 != xc_altp2m_create_view(xa.xci, xa.domain_id, 0, &alt_view1)) {
 		rc = EIO;
 		fprintf(stderr,"Failed to create execute view\n");
 		goto exit;
 	}
 
 
-	if (0!= xc_altp2m_switch_to_view(xa.xci, xa.domain_id, alt_view1)) {
+	if (0 != xc_altp2m_switch_to_view(xa.xci, xa.domain_id, alt_view1)) {
 		rc = EIO;
 		fprintf(stderr,"Failed to switch to execute view id:%u\n", alt_view1);
 		goto exit;
@@ -725,13 +759,14 @@ nif_init(const char* name)
 			VMI_MEMACCESS_RWX,
 			mem_intchk_cb,1);
 
-	if (VMI_SUCCESS !=vmi_register_event(xa.vmi, &mem_event)) {
+	if (VMI_SUCCESS != vmi_register_event(xa.vmi, &mem_event)) {
 		rc = EIO;
 		fprintf(stderr,"Failed to setup memory event\n");
 		goto exit;
 	}
 #endif
 
+	
 exit:
 	return rc;
 }
@@ -747,8 +782,10 @@ nif_get_vmi (vmi_instance_t * vmi)
 void
 nif_stop (void)
 {
+	// Called via signal handler; don't block
 	interrupted = true;
 }
+
 
 
 int
@@ -756,6 +793,8 @@ nif_event_loop (void)
 {
 	int rc = 0;
 	vmi_event_t trap_event, mem_event, cr3_event;
+
+	xa.loop_running = true;
 
 #if defined(ARM64)
 	SETUP_PRIVCALL_EVENT(&trap_event, _internal_hook_cb);
@@ -797,5 +836,15 @@ nif_event_loop (void)
 	}
 
 exit:
+//	sem_post (&xa.shutdown_complete);
+	xa.loop_running = false;
 	return rc;
 }
+
+/*
+int
+nif_start_event_loop (void)
+{
+	
+}
+*/
