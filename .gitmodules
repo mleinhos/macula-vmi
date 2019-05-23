@@ -1,0 +1,6 @@
+[submodule "ext/libvmi"]
+	path = ext/libvmi
+	url = https://github.com/libvmi/libvmi.git
+[submodule "ext/clog"]
+	path = ext/clog
+	url = https://github.com/mmueller/clog.git

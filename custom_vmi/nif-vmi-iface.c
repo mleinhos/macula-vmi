@@ -59,7 +59,7 @@ static trap_val_t trap = 0xcc;
 #endif
 
 static int act_calls = 0;
-static bool interrupted = false;
+static volatile bool interrupted = false;
 
 static p2m_view_t alt_view1 = ALTP2M_INVALID_VIEW;
 
@@ -675,11 +675,13 @@ nif_fini(void)
 {
 	fprintf (stderr, "Waiting for Xen event loop to shut down...\n");
 	while (xa.loop_running) {
-		usleep (5);
+		// Keep yielding until the loop completes
+		usleep (1);
 	}
+	assert (!xa.loop_running);
 	fprintf (stderr, "Xen event loop has shut down...\n");
-	
-	vmi_pause_vm(xa.vmi);
+
+	// The VM was paused when the loop exited
 
 	fflush (stdout);
 	g_hash_table_destroy (xa.shadow_pnode_mappings);
@@ -784,8 +786,8 @@ nif_stop (void)
 {
 	// Called via signal handler; don't block
 	interrupted = true;
+	fprintf (stderr, "Received request to shutdown VMI event loop\n");
 }
-
 
 
 int
@@ -794,7 +796,6 @@ nif_event_loop (void)
 	int rc = 0;
 	vmi_event_t trap_event, mem_event, cr3_event;
 
-	xa.loop_running = true;
 
 #if defined(ARM64)
 	SETUP_PRIVCALL_EVENT(&trap_event, _internal_hook_cb);
@@ -824,10 +825,12 @@ nif_event_loop (void)
 	vmi_register_event(xa.vmi, &cr3_event);
 #endif
 
-	vmi_resume_vm(xa.vmi);
+	fprintf (stderr, "Entering VMI event loop\n");
+	xa.loop_running = true;
+	vmi_resume_vm (xa.vmi);
 
 	while (!interrupted) {
-		status_t status = vmi_events_listen(xa.vmi,500);
+		status_t status = vmi_events_listen (xa.vmi,500);
 		if (status != VMI_SUCCESS) {
 			fprintf(stderr,"Some issue in the event_listen loop. Aborting!\n\n");
 			interrupted = true;
@@ -835,9 +838,17 @@ nif_event_loop (void)
 		}
 	}
 
+	// N.B. There may be a race here, wherein a new event could
+	// have arrived before we pause the VM
+	vmi_pause_vm (xa.vmi);
+	(void) vmi_events_listen (xa.vmi, 1);
+	xa.loop_running = false;
+		
+	fprintf (stderr, "Exited VMI event loop\n");
+
 exit:
 //	sem_post (&xa.shutdown_complete);
-	xa.loop_running = false;
+
 	return rc;
 }
 

@@ -48,7 +48,7 @@ static int nvmi_syscall_arg_regs[] = { RDI, RSI, RDX, R10, R8, R9 };
 
 typedef struct _nvmi_task_info {
 	addr_t kstack; // base of kernel stack
-	reg_t updb;
+	addr_t  task_dtb;
 
 	union {
 		reg_t key; // the key used to put this into hash table

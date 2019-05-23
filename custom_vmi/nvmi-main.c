@@ -41,6 +41,15 @@
 #include "process_kill_helper.h"
 #include "nvmi-internal-defs.h"
 
+
+/*
+ * Stopgap measure while we're working on reading userspace memory
+ * contents. Do NOT define this in master until that capability
+ * works!!!
+ */
+
+//#define EXPERIMENTAL_READ_USERMEM 1
+
 #define NVMI_EVENT_QUEUE_TIMEOUT_uS (5 * 1000)
 
 //#define NVMI_KSTACK_MASK (~0xfff)  // 1 pg stack
@@ -84,7 +93,9 @@ typedef struct _nvmi_state {
 	addr_t task_name_ofs;
 	addr_t task_pid_ofs;
 	addr_t task_ppid_ofs;
-
+	addr_t task_mm_ofs;
+	addr_t mm_pgd_ofs;
+	
 	addr_t va_current_task;
 
 	// Special-case breakpoints
@@ -137,6 +148,7 @@ pre_gather_registers (vmi_instance_t vmi,
 			rc = EIO;
 			goto exit;
 		}
+		fprintf (stderr, "syscall arg %d = %lx\n", i, regs->syscall_args[i]);
 	}
 
 	// Get the rest of the context too, for context lookup. Beware KPTI!!
@@ -148,15 +160,19 @@ pre_gather_registers (vmi_instance_t vmi,
 
 	for (int i = 0; i < NUMBER_OF(x); ++i) {
 		(void) vmi_get_vcpureg (vmi, &x[i], R0+i, event->vcpu_id);
-		fprintf (stderr, "R%d = 0x%lx\n", x[i]);
+		fprintf (stderr, "R%d = 0x%lx\n", i, x[i]);
 	}
-	
-	/*
+
+	fprintf (stderr, "Event: ttbr0 = 0x%lx\n", event->arm_regs->ttbr0);
+	fprintf (stderr, "Event: ttbr1 = 0x%lx\n", event->arm_regs->ttbr1);
+	fprintf (stderr, "Event: ttbcr = 0x%lx\n", event->arm_regs->ttbcr);
+	fprintf (stderr, "Event: cpsr  = 0x%lx\n", event->arm_regs->cpsr);
+
 	fprintf (stderr, "context: ttbr0   = %lx\n", regs->arch.arm64.ttbr0);
 	fprintf (stderr, "context: ttbr1   = %lx\n", regs->arch.arm64.ttbr1);
 	fprintf (stderr, "context: sp_el0  = %lx\n", regs->arch.arm64.sp_el0);
 	fprintf (stderr, "context: sp      = %lx\n", regs->arch.arm64.sp);
-	*/
+
 #else
 	status  = vmi_get_vcpureg (vmi, &regs->arch.intel.cr3,     CR3,     event->vcpu_id);
 	status |= vmi_get_vcpureg (vmi, &regs->arch.intel.sp,      RSP,     event->vcpu_id);
@@ -225,6 +241,8 @@ build_task_context (vmi_instance_t vmi, nvmi_registers_t * regs, addr_t curr_tas
 	int rc = 0;
 	status_t status = VMI_SUCCESS;
 	char * pname = NULL;
+	addr_t task_mm = 0;
+	addr_t mm_pgd = 0;
 
 	*tinfo = g_slice_new0 (nvmi_task_info_t);
 
@@ -261,15 +279,39 @@ build_task_context (vmi_instance_t vmi, nvmi_registers_t * regs, addr_t curr_tas
 
 	strncpy ((*tinfo)->einfo.comm, pname, sizeof((*tinfo)->einfo.comm));
 	free (pname);
-/*
-	status = vmi_pid_to_dtb (vmi, (*tinfo)->einfo.pid, &(*tinfo)->updb);
+
+
+	// Read current->mm
+	status = vmi_read_addr_va (vmi, curr_task + gstate.task_mm_ofs, 0, &task_mm);
+	if (VMI_FAILURE == status) {
+		rc = EIO;
+		fprintf (stderr, "Failed to read current->mm\n");
+		goto exit;
+	}
+
+	// Read current->mm->pgd
+	status = vmi_read_addr_va (vmi, task_mm + gstate.mm_pgd_ofs, 0, &(*tinfo)->task_dtb);
+	if (VMI_FAILURE == status) {
+		rc = EIO;
+		fprintf (stderr, "Failed to read mm->pgd\n");
+		goto exit;
+	}
+
+	fprintf (stderr, "(task->mm->pgd: PID %d --> dtb %lx\n",
+		 (uint32_t) (*tinfo)->einfo.pid,
+		 (*tinfo)->task_dtb);
+	
+	// TODO: populate task_dtb via task->mm->pgd
+	status = vmi_pid_to_dtb (vmi, (*tinfo)->einfo.pid, &(*tinfo)->task_dtb);
 	if (VMI_FAILURE == status) {
 		rc = EIO;
 		fprintf (stderr, "Failed to find page base for task, pid=%ld\n",
 			 (*tinfo)->einfo.pid);
 		goto exit;
 	}
-*/
+	fprintf (stderr, "vmi_pid_to_dtb: PID %d --> dtb %lx\n",
+		 (uint32_t) (*tinfo)->einfo.pid,
+		 (*tinfo)->task_dtb);
 
 exit:
 	return rc;
@@ -348,27 +390,37 @@ read_memory (vmi_instance_t vmi,
 	bool read_more = true;
 	char * str = NULL;
 	addr_t dtb = 0;
-	char buf[32] = {0};
+	char buf[16] = {0};
 	size_t sz = 0;
+
+#if defined(EXPERIMENTAL_READ_USERMEM)
+	// Actually try to pull the contents out of user memory
 	
 		// FIXME: fix user mem deref on ARM
 	// TODO: clear out v2p cache prior to translation
 
+	// use vmi_get_kernel_struct_offset, to find task->mm->pgd
+	// ARM: vmi_pid_to_dtb broken
+	// ARM: vmi_read is misdirected. dtb wrong?
+	// recompile libvmi with VMI_DEBUG_PTLOOKUP enabled
+/*	
 	status = vmi_pid_to_dtb (vmi, evt->task->einfo.pid, &dtb);
 	if (VMI_FAILURE == status) {
 		rc = EIO;
 		fprintf(stderr, "Error could get DTB for pid %ld\n", evt->task->einfo.pid);
 		goto exit;
 	}
-
-	fprintf (stderr, "PID %d --> DTB %lx\n", evt->task->einfo.pid, dtb);
+*/
+	dtb = evt->task->task_dtb;
+	fprintf (stderr, "PID %ld --> DTB %lx\n",
+		 evt->task->einfo.pid, dtb);
 
 	//vmi_v2pcache_flush (vmi, dtb);
 	vmi_v2pcache_flush (vmi,  ~0ull);
 	
 	access_context_t ctx = { .translate_mechanism = VMI_TM_PROCESS_DTB,
-				 //.dtb = dtb,
-				  .dtb = evt->r.arch.arm64.ttbr0,
+				 .dtb = dtb,
+				 // .dtb = evt->r.arch.arm64.ttbr1,
 				 .addr = va };
 	// better to read directly into caller buffer
 
@@ -386,15 +438,17 @@ read_memory (vmi_instance_t vmi,
 	if (VMI_FAILURE == status) {
 		rc = EIO;
 		fprintf(stderr, "Error could read memory from VA %" PRIx64 ".\n", va);
+
+		snprintf (buf, sizeof(buf), "*0x%" PRIx64, va);
+		str = strdup (buf);
 		goto exit;
 	}
 
 	fprintf (stderr, "Read string '%s' from memory\n", buf);
-	str = strdup ("junk");
-
-	
+//	str = strdup ("junk");
+	str = strdup (buf);
 	goto exit;
-	
+/*	
 #if defined(X86_64) // INTEL
 
 #  if 1 // x86: works
@@ -416,13 +470,6 @@ read_memory (vmi_instance_t vmi,
 	
 	access_context_t ctx = { .translate_mechanism = VMI_TM_PROCESS_DTB,
 				 .dtb = dtb,
-/*
-  #if defined(ARM64)
-  .dtb = evt->r.arch.arm64.ttbr1,
-  #else
-  .dtb = evt->r.arch.intel.udtb,
-  #endif
-*/
 				 .addr = va };
 	// better to read directly into caller buffer
 
@@ -442,6 +489,14 @@ read_memory (vmi_instance_t vmi,
 	
 #else // ARM
 #endif
+*/
+
+#else
+	snprintf (buf, sizeof(buf), "*0x%" PRIx64, va);
+	str = strdup (buf);
+	goto exit;
+#endif
+
 	
 exit:
 //	return rc;
@@ -479,17 +534,18 @@ pre_instr_cb (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 		goto exit;
 	}
 
-	//fprintf (stderr, "PRE: syscall: %s pid=%ld comm=%s \n",
-	//cbi->name, evt->task->einfo.pid, evt->task->einfo.comm);
-	
 	for (int i = 0; i < cbi->argct; ++i) {
 		reg_t val = evt->r.syscall_args[i];
 		char * buf = NULL;
 
+		fprintf (stderr, "Syscall processing arg %d, val=%lx\n", i, val);
+
 		switch (cbi->args[i].type) {
 		case NVMI_ARG_TYPE_SCALAR:
+		case NVMI_ARG_TYPE_PVOID:
 			break;
 		case NVMI_ARG_TYPE_STR:
+
 			buf = read_memory (vmi, evt, val, 0, 0);
 			if (NULL == buf) {
 				fprintf (stderr, "Failed to read str syscall arg\n");
@@ -804,7 +860,6 @@ handle_special_event (nvmi_event_t * evt)
 }
 
 
-
 static int
 handle_syscall_event (nvmi_event_t * evt)
 {
@@ -822,11 +877,6 @@ handle_syscall_event (nvmi_event_t * evt)
 		reg_t val = evt->r.syscall_args[i];
 
 		switch (cbi->args[i].type) {
-		case NVMI_ARG_TYPE_SCALAR:
-			//fprintf (stderr, "\targ %d: %lx\n", i+1, val);
-			snprintf (buf2, sizeof(buf2), " %lx,", val);
-			strncat (buf, buf2, sizeof(buf) - strlen(buf) - 1);
-			break;
 		case NVMI_ARG_TYPE_STR: { // char *
 			const char * str = (const char *) &(evt->mem[ evt->mem_ofs[i]]);
 			if (strlen(str) > 0) {
@@ -836,8 +886,10 @@ handle_syscall_event (nvmi_event_t * evt)
 			//fprintf (stderr, "\targ %d: %s\n", i+1, str);
 		}
 			break;
-		case NVMI_ARG_TYPE_SA: {
+
 #if 0
+		case NVMI_ARG_TYPE_SA: {
+
 			struct addrinfo_in6 ai;
 			struct addrinfo *res;
 
@@ -860,10 +912,17 @@ handle_syscall_event (nvmi_event_t * evt)
 
 			//printf ("\targ %d: %s\n", i+1, res->ai_cannonname);
 			freeaddrinfo (res);
-#endif
+
 		}
 			break;
+#endif
+		case NVMI_ARG_TYPE_SCALAR:
+		case NVMI_ARG_TYPE_PVOID:
+		case NVMI_ARG_TYPE_SA: // for now, don't deref SA
 		default:
+			//fprintf (stderr, "\targ %d: %lx\n", i+1, val);
+			snprintf (buf2, sizeof(buf2), " %lx,", val);
+			strncat (buf, buf2, sizeof(buf) - strlen(buf) - 1);
 			break;
 		} // switch
 	} // for
@@ -984,6 +1043,8 @@ nvmi_main_init (void)
 	
 	status |= vmi_get_offset (vmi, "linux_name", &gstate.task_name_ofs);
 	status |= vmi_get_offset (vmi, "linux_pid",  &gstate.task_pid_ofs);
+	status |= vmi_get_kernel_struct_offset (vmi, "task_struct", "mm", &gstate.task_mm_ofs);
+	status |= vmi_get_kernel_struct_offset (vmi, "mm_struct", "pgd", &gstate.mm_pgd_ofs);
 	//status |= vmi_get_offset (vmi, "linux_ppid",  &gstate.task_ppid_ofs);
 	
 	if (VMI_FAILURE == status) {
@@ -992,7 +1053,9 @@ nvmi_main_init (void)
 		goto exit;
 	}
 	assert (gstate.task_name_ofs &&
-		gstate.task_pid_ofs   );
+		gstate.task_pid_ofs  &&
+		gstate.task_mm_ofs   &&
+		gstate.mm_pgd_ofs );
 /*
 	status = vmi_translate_ksym2v(vmi, "exit_mmap", &gstate.va_exit_mmap);
 	if (VMI_FAILURE == status) {
