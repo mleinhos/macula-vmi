@@ -1099,8 +1099,14 @@ nvmi_event_consumer (gpointer data)
 
 exit:
 	clog_info (CLOG(CLOGGER_ID), "Completed event consumer loop");
-	zmq_close (gstate.zmq_event_socket);
-	gstate.zmq_event_socket = NULL;
+
+	// Event socket
+	clog_info (CLOG(CLOGGER_ID), "Closing event socket");
+	if (gstate.zmq_event_socket) {
+		zmq_close (gstate.zmq_event_socket);
+	} 
+	gstate.zmq_event_socket  = NULL;
+
 	return NULL;
 }
 
@@ -1110,20 +1116,25 @@ nvmi_main_fini (void)
 	// releasing queue causes event consumer to return
 	if (gstate.event_queue) {
 		g_async_queue_unref (gstate.event_queue);
+		gstate.event_queue = NULL;
 	}
 	clog_info (CLOG(CLOGGER_ID), "Event queue dereferenced");
 
 	if (gstate.consumer_thread) {
 		clog_info (CLOG(CLOGGER_ID), "Giving consumer thread time to leave.");
-		//g_thread_join (gstate.consumer_thread);
-		usleep(1);
+		g_thread_join (gstate.consumer_thread);
+		//usleep(1);
+		clog_info (CLOG(CLOGGER_ID), "Consumer thread joined");
+		gstate.consumer_thread = NULL;
 	}
-	//clog_info (CLOG(CLOGGER_ID), "Consumer thread joined");
 
 	if (gstate.context_lookup) {
 		g_hash_table_destroy (gstate.context_lookup);
+		gstate.context_lookup = NULL;
+		clog_info (CLOG(CLOGGER_ID), "Context lookup table destroyed");
 	}
-	clog_info (CLOG(CLOGGER_ID), "Context lookup table destroyed");
+
+	clog_info (CLOG(CLOGGER_ID), "main cleanup complete");
 }
 
 static int
@@ -1209,6 +1220,7 @@ comms_request_servicer (gpointer data)
 
 	rc = zmq_recv (gstate.zmq_request_socket, msg, sizeof(msg), 0);
         if (rc <= 0) {
+		clog_info (CLOG(CLOGGER_ID), "Request servicer thread bailing out");
 		break;
         }
 
@@ -1222,10 +1234,16 @@ comms_request_servicer (gpointer data)
     }
 
 exit:
-    clog_info (CLOG(CLOGGER_ID), "Shutting down request socket");
-    zmq_close (gstate.zmq_request_socket);
-    gstate.zmq_request_socket = NULL;
+    clog_info (CLOG(CLOGGER_ID), "Request servicer thread returning");
 
+    // Request socket
+    clog_info (CLOG(CLOGGER_ID), "Closing request socket");
+    if (gstate.zmq_request_socket) {
+	    zmq_close (gstate.zmq_request_socket);
+    }
+    gstate.zmq_request_socket  = NULL;
+
+    //g_thread_exit (NULL);
     return NULL;
 }
 
@@ -1233,21 +1251,27 @@ static void
 comms_fini(void)
 {
 	clog_info (CLOG(CLOGGER_ID), "Beginning comms shutdown");
+
+	// ZMQ context
 	if (gstate.zmq_context) {
-		zmq_ctx_shutdown (gstate.zmq_context);
+		// Notify all threads using ZMQ comms to stop and
+		// close their respective sockets. zmq_term() waits
+		// for all sockets opened with given context to be
+		// closed.
+		zmq_term (gstate.zmq_context);
+		clog_info (CLOG(CLOGGER_ID), "All ZMQ sockets closed");
 		zmq_ctx_destroy (gstate.zmq_context);
 	}
+	gstate.zmq_context = NULL;
 
-	if (gstate.zmq_event_socket)  zmq_close (gstate.zmq_event_socket);
-	if (gstate.zmq_request_socket)  zmq_close (gstate.zmq_request_socket);
-
+	// Request servicer thread
+	clog_info (CLOG(CLOGGER_ID), "Joining request servicer");
 	if (gstate.request_service_thread) {
 		g_thread_join (gstate.request_service_thread);
 	}
+	gstate.request_service_thread = NULL;
 
-	gstate.zmq_context = NULL;
-	gstate.zmq_event_socket  = NULL;
-	gstate.zmq_request_socket  = NULL;
+
 	clog_info (CLOG(CLOGGER_ID), "Comms shutdown complete");
 }
 
@@ -1256,6 +1280,7 @@ comms_init(void)
 {
 	int rc = 0;
 
+	// ZMQ context
 	gstate.zmq_context = zmq_ctx_new();
 	if (NULL == gstate.zmq_context) {
 		rc = errno;
@@ -1263,6 +1288,7 @@ comms_init(void)
 		goto exit;
 	}
 
+	// Event socket
 	gstate.zmq_event_socket = zmq_socket (gstate.zmq_context, ZMQ_PAIR);
 	if (NULL == gstate.zmq_event_socket) {
 		rc = zmq_errno();
@@ -1276,6 +1302,7 @@ comms_init(void)
 		goto exit;
 	}
 
+	// Request socket
 	gstate.zmq_request_socket = zmq_socket (gstate.zmq_context, ZMQ_PAIR);
 	if (NULL == gstate.zmq_request_socket) {
 		rc = zmq_errno();
@@ -1289,7 +1316,9 @@ comms_init(void)
 		goto exit;
 	}
 
-	gstate.request_service_thread = g_thread_new ("request servicer", comms_request_servicer, NULL);
+	// Request servicer thread
+	gstate.request_service_thread =
+		g_thread_new ("request servicer", comms_request_servicer, NULL);
 
 exit:
 	return rc;
