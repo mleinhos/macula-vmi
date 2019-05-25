@@ -108,6 +108,7 @@ typedef struct _nvmi_state {
 	// Special-case breakpoints
 	addr_t va_exit_mm;
 
+	bool use_comms;
 	void* zmq_context;
 	void* zmq_event_socket;
 	void* zmq_request_socket;
@@ -135,23 +136,32 @@ logger_fini (void)
 
 
 static int
-logger_init (void)
+logger_init (const char * logfile,
+	     int verbosity_level)
 {
 	int rc = 0;
 
-#if 1
-	rc = clog_init_fd (CLOGGER_ID, fileno(stderr));
-#else
-	rc =  clog_init_path (CLOGGER_ID, NVMI_LOG_FILE);
-#endif
+	if (logfile) {
+		rc =  clog_init_path (CLOGGER_ID, logfile);
+	} else {
+		rc = clog_init_fd (CLOGGER_ID, fileno(stderr));		
+	}
 	if (rc) {
 		fprintf (stderr, "Logger initialization failure\n");
 		goto exit;
 	}
 
-	// TODO: set this from a cmdline arg
-	(void) clog_set_level (CLOGGER_ID, CLOG_INFO);
-//	(void) clog_set_level (CLOGGER_ID, CLOG_DEBUG);
+	switch (verbosity_level) {
+	case 0:
+		(void) clog_set_level (CLOGGER_ID, CLOG_WARN);
+		break;
+	case 1:
+		(void) clog_set_level (CLOGGER_ID, CLOG_INFO);
+		break;
+	default: // 2+
+		(void) clog_set_level (CLOGGER_ID, CLOG_DEBUG);
+		break;
+	}
 
 	// Minimize the clutter
 	(void) clog_set_time_fmt (CLOGGER_ID, "");
@@ -778,8 +788,7 @@ instrument_syscall (char *name, addr_t kva)
 		name[i] = (char) tolower(name[i]);
 	}
 
-	if (strncmp (name, "sys_", 4))
-	{
+	if (strncmp (name, "sys_", 4)) {
 		// mismatch
 		rc = ENOENT;
 		goto exit;
@@ -951,11 +960,10 @@ consume_special_event (nvmi_event_t * evt)
 			gstate.killpid = KILL_PID_NONE;
 		}
 
-		// we'll never see that again....
+		// we'll never see that task again....
 		g_hash_table_remove (gstate.context_lookup, (gpointer) evt->task->key);
 	}
 
-//exit:
 	return rc;
 }
 
@@ -983,9 +991,9 @@ consume_syscall_event (nvmi_event_t * evt)
 				snprintf (buf2, sizeof(buf2) - 1, " \"%s\",", str);
 				strncat (buf, buf2, sizeof(buf) - strlen(buf) - 1);
 			}
-			//clog_info (CLOG(CLOGGER_ID), "\targ %d: %s", i+1, str);
-		}
 			break;
+		}
+
 
 #if 0
 		case NVMI_ARG_TYPE_SA: {
@@ -1012,9 +1020,9 @@ consume_syscall_event (nvmi_event_t * evt)
 
 			//printf ("\targ %d: %s", i+1, res->ai_cannonname);
 			freeaddrinfo (res);
-
-		}
 			break;
+		}
+
 #endif
 		case NVMI_ARG_TYPE_SCALAR:
 		case NVMI_ARG_TYPE_PVOID:
@@ -1036,10 +1044,12 @@ consume_syscall_event (nvmi_event_t * evt)
 #endif
 	strncat (buf, buf2, sizeof(buf) - strlen(buf) - 1);
 
-	rc = zmq_send (gstate.zmq_event_socket, buf, strlen(buf)+1, 0);
-        if (rc < 0) {
-		clog_warn (CLOG(CLOGGER_ID),"zmq_send() failed: %d", rc);
-        }
+	if (gstate.use_comms) {
+		rc = zmq_send (gstate.zmq_event_socket, buf, strlen(buf)+1, 0);
+		if (rc < 0) {
+			clog_warn (CLOG(CLOGGER_ID),"zmq_send() failed: %d", rc);
+		}
+	}
 
 	////
 	clog_info (CLOG(CLOGGER_ID), "%s", buf);
@@ -1168,7 +1178,6 @@ nvmi_main_init (void)
 	status |= vmi_get_offset (vmi, "linux_pid",  &gstate.task_pid_ofs);
 	status |= vmi_get_kernel_struct_offset (vmi, "task_struct", "mm", &gstate.task_mm_ofs);
 	status |= vmi_get_kernel_struct_offset (vmi, "mm_struct", "pgd", &gstate.mm_pgd_ofs);
-	//status |= vmi_get_offset (vmi, "linux_ppid",  &gstate.task_ppid_ofs);
 
 	if (VMI_FAILURE == status) {
 		clog_warn (CLOG(CLOGGER_ID), "Failed to get offset");
@@ -1179,14 +1188,6 @@ nvmi_main_init (void)
 		gstate.task_pid_ofs  &&
 		gstate.task_mm_ofs   &&
 		gstate.mm_pgd_ofs );
-/*
-	status = vmi_translate_ksym2v(vmi, "exit_mmap", &gstate.va_exit_mmap);
-	if (VMI_FAILURE == status) {
-		rc = EIO;
-		clog_warn (CLOG(CLOGGER_ID),"Error could get the current_task offset.");
-		goto exit;
-	}
-*/
 
 #if !defined(ARM64)
 	status = vmi_translate_ksym2v(vmi, "per_cpu__current_task", &gstate.va_current_task);
@@ -1250,6 +1251,10 @@ exit:
 static void
 comms_fini(void)
 {
+	if (!gstate.use_comms) {
+		return;
+	}
+
 	clog_info (CLOG(CLOGGER_ID), "Beginning comms shutdown");
 
 	// ZMQ context
@@ -1279,6 +1284,10 @@ static int
 comms_init(void)
 {
 	int rc = 0;
+
+	if (!gstate.use_comms) {
+		goto exit;
+	}
 
 	// ZMQ context
 	gstate.zmq_context = zmq_ctx_new();
@@ -1333,18 +1342,46 @@ main (int argc, char* argv[])
 	status_t status;
 	const char* name = argv[1];
 	const char* in_path = argv[2];
+	int opt = 0;
+	int verbosity = 0;
+	char * log_file = NULL;
+	bool help = false;
 
-	if (argc != 3) {
-		printf("Usage: %s <domain name> <path to system_map>\n", argv[0]);
+	gstate.use_comms = true;
+	
+	while ((opt = getopt(argc, argv, ":o:sv")) != -1) {
+		switch (opt) {
+		case 'o':
+			log_file = optarg;
+			break;
+		case 'v':
+			++verbosity;
+			break;
+		case 's':
+			gstate.use_comms = false;
+			break;
+		case '?':
+			fprintf (stderr, "Illegal option: %c\n", optopt);
+			help = true;
+			break;
+		}
+	}
+
+	if (help || argc - optind != 2) {
+		printf("Usage:\n");
+		printf("%s [-v] [-o logfile] <domain name> <path to system_map>\n", argv[0]);
+		printf("\t-v Increases verbosity of output logging, can be specified several times.\n");
+		printf("\t-o Specifies file where output logging goes. Default is stderr.\n");
+		printf("\t-s Run in silent mode - do not output events to brain.\n");
 		return 1;
 	}
 
-	if (logger_init()) {
+	if (logger_init(log_file, verbosity)) {
 		goto exit;
 	}
 
 	// Returns with VM suspended
-	rc = nif_init (argv[1], (bool *) &gstate.nif_busy);
+	rc = nif_init (argv[optind], (bool *) &gstate.nif_busy);
 	if (rc) {
 		goto exit;
 	}
@@ -1359,7 +1396,7 @@ main (int argc, char* argv[])
 		goto exit;
 	}
 
-	rc = set_instrumentation_points (argv[2]);
+	rc = set_instrumentation_points (argv[optind+1]);
 	if (rc) {
 		goto exit;
 	}

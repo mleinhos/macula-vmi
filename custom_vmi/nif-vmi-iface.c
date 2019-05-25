@@ -77,7 +77,6 @@ typedef struct {
 
 	GHashTable* shadow_pnode_mappings; //key:shadow
 
-//	sem_t shutdown_complete;
 	bool loop_running;
 	bool * ext_nif_busy;
 
@@ -100,8 +99,10 @@ typedef struct nif_hook_node {
 	nif_event_callback_t	post_cb;
 	void* 			cb_arg;
 
+	 // orig value in shadow frame (init instr point)
 	trap_val_t             backup_val1;
 #if defined(ARM64)
+	// orig value in orig view (secondary instr point)
 	trap_val_t             backup_val2;
 #endif
 } nif_hook_node;
@@ -114,40 +115,18 @@ static inline status_t
 write_trap_val_va (vmi_instance_t vmi, addr_t va, trap_val_t val)
 {
 	return vmi_write_va (vmi, va, 0, sizeof(trap_val_t), &val, NULL);
-/*
-#if defined(ARM64)
-	return vmi_write_32_va (vmi, va, 0, &val);
-#else
-	return vmi_write_8_va (vmi, va, 0, &val);
-#endif
-*/
 }
 
 static inline status_t
 write_trap_val_pa (vmi_instance_t vmi, addr_t pa, trap_val_t val)
 {
 	return vmi_write_pa (vmi, pa, sizeof(trap_val_t), &val, NULL);
-/*
-#if defined(ARM64)
-	return vmi_write_32_pa (vmi, pa, &val);
-#else
-	return vmi_write_8_pa (vmi, pa, &val);
-#endif
-*/
 }
 
 static inline status_t
 read_trap_val_va (vmi_instance_t vmi, addr_t va, trap_val_t* val)
 {
 	return vmi_read_va (vmi, va, 0, sizeof(trap_val_t), val, NULL);
-/*
-#if defined(ARM64)
-	return vmi_read_32_va (vmi, va, 0, val);
-	//return vmi_write_va (vmi, va, 0, sizeof(trap_val_t), &val, NULL);
-#else
-	return vmi_read_8_va (vmi, va, 0, val);
-#endif
-*/
 }
 
 
@@ -417,14 +396,7 @@ nif_enable_monitor (addr_t kva,
 		clog_error (CLOG(CLOGGER_ID), "Failed to read orig val near %" PRIx64 "", kva);
 		goto exit;
 	}
-/*
-	status = vmi_translate_kv2p (xa.vmi, kva, &pa);
-	if (VMI_SUCCESS != status) {
-		rc = EINVAL;
-		clog_error (CLOG(CLOGGER_ID), "Failed to find PA for VA=%" PRIx64 "", kva);
-		goto exit;
-	}
-*/
+
 	status = vmi_pagetable_lookup (xa.vmi, xa.kdtb, kva, &pa);
 	if (VMI_SUCCESS != status) {
 		rc = EINVAL;
@@ -523,7 +495,6 @@ nif_enable_monitor (addr_t kva,
 
 	status  = write_trap_val_pa (xa.vmi, MKADDR(shadow_frame, offset), trap);
 #if defined(ARM64)
-	//status |= write_trap_val_pa (xa.vmi, shadow + 4, trap);
 	status |= write_trap_val_pa (xa.vmi, MKADDR(frame,  offset) + 4, trap);
 #endif
 	if (VMI_SUCCESS != status) {
@@ -607,13 +578,16 @@ cr3_cb(vmi_instance_t vmi, vmi_event_t* event)
 {
 	event->x86_regs->cr3 = event->reg_event.value;
 
-	//Flush process_related caches for clean start and consistency
+	// Flush process_related caches for clean start and
+	// consistency
+
+	// TODO: optimize this - perhaps just flush in event
+	// callbacks, when user memory will be interrogated
 
 	vmi_symcache_flush(vmi);
 	vmi_pidcache_flush(vmi);
 	vmi_v2pcache_flush(vmi, event->reg_event.previous);
 	vmi_rvacache_flush(vmi);
-
 
 	return VMI_EVENT_RESPONSE_NONE;
 }
@@ -708,6 +682,7 @@ clean:
 	return rc;
 }
 
+
 void
 nif_fini(void)
 {
@@ -737,9 +712,8 @@ nif_fini(void)
 	vmi_resume_vm(xa.vmi);
 
 	vmi_destroy(xa.vmi);
-
-//	sem_destroy (&xa.shutdown_complete);
 }
+
 
 int
 nif_init(const char* name,
@@ -874,17 +848,7 @@ nif_event_loop (void)
 		}
 	}
 
-	// N.B. There may be a race here, wherein a new event could
-	// have arrived before we pause the VM
 	vmi_pause_vm (xa.vmi);
-/*
-	vmi_clear_event (xa.vmi, &main_event, NULL);
-#if !defined(ARM64)
-	vmi_clear_event (xa.vmi, &cr3_event, NULL);
-#endif
-	
-	(void) vmi_events_listen (xa.vmi, 1);
-*/
 	xa.loop_running = false;
 	*xa.ext_nif_busy = false;
 
