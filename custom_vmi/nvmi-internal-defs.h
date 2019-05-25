@@ -22,6 +22,18 @@
  */
 typedef struct _nvmi_registers {
 
+	union {
+		struct {
+			arm_registers_t r;
+			reg_t sp_el0;
+			reg_t sp;
+		} arm;
+
+		struct {
+			x86_registers_t r;
+			reg_t sp;
+		} x86;
+	};
 /*
 	union {
 		struct {
@@ -37,8 +49,8 @@ typedef struct _nvmi_registers {
 		} arm64;
 	} arch;
 */
-	reg_t        sp;
-	registers_t  all;
+
+//	registers_t  all;
 	reg_t syscall_args[NVMI_MAX_SYSCALL_ARG_CT];
 } nvmi_registers_t;
 

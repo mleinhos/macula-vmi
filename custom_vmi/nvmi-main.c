@@ -189,11 +189,12 @@ cb_gather_registers (vmi_instance_t vmi,
 
 	// Get the rest of the context too, for context lookup. Beware KPTI!!
 #if defined(ARM64)
-	regs->all.arm = *(event->arm_regs);
-	status = vmi_get_vcpureg (vmi, &regs->sp, SP_USR, event->vcpu_id);
+	regs->arm.r = *(event->arm_regs);
+	status  = vmi_get_vcpureg (vmi, &regs->arm.sp, SP_USR, event->vcpu_id);
+	status |= vmi_get_vcpureg (vmi, &regs->arm.sp_el0, SP_EL0, event->vcpu_id);
 #else
-	regs->all.x86 = *(event->x86_regs);
-	status = vmi_get_vcpureg (vmi, &regs->sp, RSP, event->vcpu_id);
+	regs->x86.r = *(event->x86_regs);
+	status = vmi_get_vcpureg (vmi, &regs->x86.sp, RSP, event->vcpu_id);
 #endif
 	if (VMI_SUCCESS != status) {
 		rc = EFAULT;
@@ -266,13 +267,13 @@ cb_current_task (vmi_instance_t vmi,
 
 #if defined(ARM64)
 	// Fast: get current task_struct *
-	*task = regs->arch.arm64.sp_el0;
+	*task = regs->arm.sp_el0;
 #else
 	// x86: slow
 	// key = regs->arch.intel.sp & NVMI_KSTACK_MASK;
 	// ^^^ too uncertain for a process identification ...
 	status_t status = vmi_read_addr_va(vmi,
-					   regs->all.x86.gs_base + gstate.va_current_task,
+					   regs->x86.r.gs_base + gstate.va_current_task,
 					   0,
 					   task);
 	if (VMI_SUCCESS != status) {
@@ -307,9 +308,9 @@ cb_build_task_context (vmi_instance_t vmi,
 
 	// Figure out the currect task. See kernel's impl of current() for clues.
 #if defined(ARM64)
-	(*tinfo)->kstack = regs->sp & NVMI_KSTACK_MASK;
+	(*tinfo)->kstack = regs->arm.sp & NVMI_KSTACK_MASK;
 #else
-	(*tinfo)->kstack = regs->sp & NVMI_KSTACK_MASK;
+	(*tinfo)->kstack = regs->x86.sp & NVMI_KSTACK_MASK;
 #endif
 	(*tinfo)->p_task_struct = curr_task;
 
@@ -1019,10 +1020,10 @@ consume_syscall_event (nvmi_event_t * evt)
 
 #if defined(ARM64)
 	snprintf (buf2, sizeof(buf2), ")	proc=%s	pid=%d	 TTBR0=%" PRIx32 "	TTBR1=%" PRIx32 "",
-		  evt->task->comm, evt->task->pid, evt->r.arch.arm64.ttbr0, evt->r.arch.arm64.ttbr1);
+		  evt->task->comm, evt->task->pid, evt->r.arm.r.ttbr0, evt->r.arm.r.ttbr1);
 #else
 	snprintf (buf2, sizeof(buf2), ")	proc=%s		pid=%d		CR3=%" PRIx64 "",
-		  evt->task->comm, evt->task->pid, evt->r.all.x86.cr3);
+		  evt->task->comm, evt->task->pid, evt->r.x86.r.cr3);
 #endif
 	strncat (buf, buf2, sizeof(buf) - strlen(buf) - 1);
 
