@@ -638,7 +638,7 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 		reg_t val = evt->r.syscall_args[i];
 		char * buf = NULL;
 
-		clog_debug (CLOG(CLOGGER_ID), "Syscall processing arg %d, val=%lx", i, val);
+		//clog_debug (CLOG(CLOGGER_ID), "Syscall processing arg %d, val=%lx", i, val);
 
 		switch (cbi->args[i].type) {
 		case NVMI_ARG_TYPE_SCALAR:
