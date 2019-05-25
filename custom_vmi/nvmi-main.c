@@ -142,8 +142,12 @@ logger_init (const char * logfile,
 	int rc = 0;
 
 	if (logfile) {
+		fprintf (stderr, "Initializing logging to %s, verbosity=%d\n",
+			 logfile, verbosity_level);
 		rc =  clog_init_path (CLOGGER_ID, logfile);
 	} else {
+		fprintf (stderr, "Initializing logging to stderr, verbosity=%d\n",
+			 verbosity_level);
 		rc = clog_init_fd (CLOGGER_ID, fileno(stderr));		
 	}
 	if (rc) {
@@ -1334,7 +1338,6 @@ exit:
 }
 
 
-
 int
 main (int argc, char* argv[])
 {
@@ -1368,6 +1371,7 @@ main (int argc, char* argv[])
 	}
 
 	if (help || argc - optind != 2) {
+		printf("*** Numen Introspection Framework v2.0 ***\n\n");
 		printf("Usage:\n");
 		printf("%s [-v] [-o logfile] <domain name> <path to system_map>\n", argv[0]);
 		printf("\t-v Increases verbosity of output logging, can be specified several times.\n");

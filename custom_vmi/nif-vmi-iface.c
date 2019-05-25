@@ -389,7 +389,7 @@ nif_enable_monitor (addr_t kva,
 	// Read orig values
 	status  = read_trap_val_va (xa.vmi, kva, &orig1);
 #if defined(ARM64)
-	status |=  read_trap_val_va (xa.vmi, kva+4, &orig2);
+	status |= read_trap_val_va (xa.vmi, kva+4, &orig2);
 #endif
 	if (VMI_SUCCESS != status) {
 		rc = EACCES;
@@ -409,7 +409,6 @@ nif_enable_monitor (addr_t kva,
 
 	shadow_frame = (addr_t) GPOINTER_TO_SIZE (g_hash_table_lookup(xa.pframe_sframe_mappings,
 								      GSIZE_TO_POINTER(frame)));
-
 	if (0 == shadow_frame) {
 		// Allocate frame if not already there
 		shadow_frame = ++(xa.max_gpfn);
@@ -742,8 +741,6 @@ nif_init(const char* name,
 	if (rc) {
 		goto exit;
 	}
-
-	fprintf (stderr, "\n\t\t\tNumen Introspection Framework v2.0\n\n");
 
 	xa.pframe_sframe_mappings = g_hash_table_new (NULL, NULL);
 	xa.shadow_pnode_mappings = g_hash_table_new_full (NULL, NULL, NULL, free_nif_page_node);
