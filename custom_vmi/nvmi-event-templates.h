@@ -177,7 +177,7 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
 	  .name = "sys_geteuid", .argct = 0, false, true, NULL, .args = {} },
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_getpid",  .argct = 0, false, true, NULL, .args = {} },
+	  .name = "sys_getpid",  .argct = 0, false, false, NULL, .args = {} }, // verbose
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
 	  .name = "sys_getpgrp", .argct = 0, false, true, NULL, .args = {} },
 
@@ -197,6 +197,7 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_PVOID  },
 		    { .type = NVMI_ARG_TYPE_PVOID  } } },
+
 
 	// !!!!!!!!!! INCOMPLETE/INCORRECT DEFS 
 	// While incorrect, keep argct == 0

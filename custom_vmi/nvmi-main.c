@@ -94,6 +94,7 @@ typedef struct _nvmi_state {
 	// Signal handler
 	struct sigaction act;
 	bool interrupted;
+	volatile bool nif_busy;
 
 	// VMI info
 	addr_t task_name_ofs;
@@ -147,10 +148,15 @@ logger_init (void)
 		fprintf (stderr, "Logger initialization failure\n");
 		goto exit;
 	}
-	(void) clog_set_level (CLOGGER_ID, CLOG_INFO);
 
+	// TODO: set this from a cmdline arg
+	(void) clog_set_level (CLOGGER_ID, CLOG_INFO);
+//	(void) clog_set_level (CLOGGER_ID, CLOG_DEBUG);
+
+	// Minimize the clutter
 	(void) clog_set_time_fmt (CLOGGER_ID, "");
 	(void) clog_set_date_fmt (CLOGGER_ID, "");
+
 exit:
 	return rc;
 }
@@ -160,8 +166,10 @@ static void
 close_handler(int sig)
 {
 	clog_info (CLOG(CLOGGER_ID), "Received signal %d, shutting down", sig);
-	gstate.interrupted = true;
-	nif_stop();
+	if (!gstate.interrupted) {
+		gstate.interrupted = true;
+		nif_stop();
+	}
 }
 
 
@@ -645,7 +653,7 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 			// Only worry about 1 dereferenced pointer, for now
 			evt->mem_ofs[i] = 0;
 			evt->arg_lens[i] = MIN(sizeof(evt->mem), strlen(buf));
-			strncpy (evt->mem, buf, sizeof(evt->mem));
+			strncpy (evt->mem, buf, evt->arg_lens[i]);
 			free (buf);
 			break;
 		case NVMI_ARG_TYPE_SA: {
@@ -721,7 +729,7 @@ cb_post_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 
 
 static int
-handle_special_instr_point (const char *name, addr_t kva)
+instrument_special_point (const char *name, addr_t kva)
 {
 	int rc = ENOENT;
 	nvmi_cb_info_t * cbi = NULL;
@@ -747,7 +755,7 @@ exit:
 }
 
 static int
-handle_syscall (char *name, addr_t kva)
+instrument_syscall (char *name, addr_t kva)
 {
 	int rc = 0;
 	nvmi_cb_info_t * cbi = NULL;
@@ -829,7 +837,7 @@ handle_syscall (char *name, addr_t kva)
 
 	// Stage syscall dynamically; name only
 	if (NULL == cbi) {
-		clog_warn (CLOG(CLOGGER_ID), "\tdynamically adding symbol %s: no template found", name);
+		clog_info (CLOG(CLOGGER_ID), "monitoring syscall %s without a template", name);
 		cbi = &nvmi_syscalls[nvmi_syscall_new++];
 		cbi->cb_type = NVMI_CALLBACK_SYSCALL;
 		cbi->enabled = true;
@@ -891,7 +899,7 @@ set_instrumentation_points (const char* mappath)
 		//printf ("symbol: %s, addr %lx\n", name, kva);
 		//if (0 == strcmp("sys_sendmsg", name)) { __asm__("int $3");}
 
-		rc = handle_special_instr_point (name, kva);
+		rc = instrument_special_point (name, kva);
 		if (0 == rc) { // success
 			continue;
 		} else if (ENOENT != rc) {
@@ -900,7 +908,7 @@ set_instrumentation_points (const char* mappath)
 		}
 
 		// Otherwise, try to match with a syscall
-		rc = handle_syscall (name, kva);
+		rc = instrument_syscall (name, kva);
 		if (0 == rc) { // success
 			continue;
 		} else if (ENOENT != rc) {
@@ -909,7 +917,7 @@ set_instrumentation_points (const char* mappath)
 		}
 	} // while
 
-	clog_warn (CLOG(CLOGGER_ID), "Found %d syscalls to monitor", gstate.act_calls);
+	clog_info (CLOG(CLOGGER_ID), "Found %d syscalls to monitor", gstate.act_calls);
 	rc = 0;
 
 exit:
@@ -930,7 +938,8 @@ consume_special_event (nvmi_event_t * evt)
 	assert (cbi);
 	assert (cbi->cb_type == NVMI_CALLBACK_SPECIAL);
 
-	clog_info (CLOG(CLOGGER_ID), "special event %s occurred", cbi->name);
+	clog_info (CLOG(CLOGGER_ID), "special event %s occurred in pid=%d comm=%s",
+		   cbi->name, evt->task->pid, evt->task->comm);
 
 	if (cbi == &nvmi_special_cbs[NVMI_DO_EXIT_IDX]) {
 		// handle process destruction
@@ -1032,6 +1041,7 @@ consume_syscall_event (nvmi_event_t * evt)
 		clog_warn (CLOG(CLOGGER_ID),"zmq_send() failed: %d", rc);
         }
 
+	////
 	clog_info (CLOG(CLOGGER_ID), "%s", buf);
 
 //exit:
@@ -1054,7 +1064,7 @@ nvmi_event_consumer (gpointer data)
 	clog_info (CLOG(CLOGGER_ID), "Begining event consumer loop");
 
 	// Monitor gstate.interrupted
-	while (!gstate.interrupted) {
+	while (!gstate.interrupted || gstate.nif_busy) {
 		nvmi_event_t * evt = (nvmi_event_t *)
 			g_async_queue_timeout_pop (gstate.event_queue, NVMI_EVENT_QUEUE_TIMEOUT_uS);
 		if (NULL == evt) {
@@ -1097,22 +1107,23 @@ exit:
 static void
 nvmi_main_fini (void)
 {
-	if (gstate.consumer_thread) {
-		g_thread_join (gstate.consumer_thread);
-	}
-	clog_info (CLOG(CLOGGER_ID), "Consumer thread joined");
-
 	// releasing queue causes event consumer to return
 	if (gstate.event_queue) {
 		g_async_queue_unref (gstate.event_queue);
 	}
 	clog_info (CLOG(CLOGGER_ID), "Event queue dereferenced");
 
+	if (gstate.consumer_thread) {
+		clog_info (CLOG(CLOGGER_ID), "Giving consumer thread time to leave.");
+		//g_thread_join (gstate.consumer_thread);
+		usleep(1);
+	}
+	//clog_info (CLOG(CLOGGER_ID), "Consumer thread joined");
+
 	if (gstate.context_lookup) {
 		g_hash_table_destroy (gstate.context_lookup);
 	}
 	clog_info (CLOG(CLOGGER_ID), "Context lookup table destroyed");
-
 }
 
 static int
@@ -1121,6 +1132,15 @@ nvmi_main_init (void)
 	int rc = 0;
 	status_t status = VMI_SUCCESS;
 	vmi_instance_t vmi;
+
+	// Handle ctrl+c properly
+	gstate.act.sa_handler = close_handler;
+	gstate.act.sa_flags = 0;
+	sigemptyset(&gstate.act.sa_mask);
+	sigaction(SIGHUP,  &gstate.act, NULL);
+	sigaction(SIGTERM, &gstate.act, NULL);
+	sigaction(SIGINT,  &gstate.act, NULL);
+	sigaction(SIGALRM, &gstate.act, NULL);
 
 	rc = nif_get_vmi (&vmi);
 	if (rc) {
@@ -1294,17 +1314,8 @@ main (int argc, char* argv[])
 		goto exit;
 	}
 
-	/* Handle ctrl+c properly */
-	gstate.act.sa_handler = close_handler;
-	gstate.act.sa_flags = 0;
-	sigemptyset(&gstate.act.sa_mask);
-	sigaction(SIGHUP,  &gstate.act, NULL);
-	sigaction(SIGTERM, &gstate.act, NULL);
-	sigaction(SIGINT,  &gstate.act, NULL);
-	sigaction(SIGALRM, &gstate.act, NULL);
-
 	// Returns with VM suspended
-	rc = nif_init (argv[1]);
+	rc = nif_init (argv[1], (bool *) &gstate.nif_busy);
 	if (rc) {
 		goto exit;
 	}
@@ -1324,15 +1335,16 @@ main (int argc, char* argv[])
 		goto exit;
 	}
 
+	// Resumes the VM, but returns with it paused
 	rc = nif_event_loop();
 	if (rc) {
 		goto exit;
 	}
 
 exit:
-	gstate.interrupted = true;
+	close_handler (0);
 
-	nif_stop();
+	// Resumes VM
 	nif_fini();
 
 	nvmi_main_fini();

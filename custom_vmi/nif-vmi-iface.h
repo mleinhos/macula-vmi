@@ -33,7 +33,8 @@ typedef void (*nif_event_callback_t) (vmi_instance_t vmi, vmi_event_t* event, vo
  */
 
 int
-nif_init(const char* name);
+nif_init(const char* name,
+	 bool * nif_busy);
 
 
 void
@@ -43,6 +44,7 @@ nif_fini (void);
 void
 nif_stop(void);
 
+
 int
 nif_get_vmi (vmi_instance_t* vmi);
 
@@ -50,8 +52,10 @@ nif_get_vmi (vmi_instance_t* vmi);
 int
 nif_event_loop (void);
 
+
 int
 nif_is_monitored(addr_t kva, bool * monitored);
+
 
 int
 nif_enable_monitor (addr_t kva,

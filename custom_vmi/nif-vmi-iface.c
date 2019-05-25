@@ -46,17 +46,13 @@ typedef uint16_t p2m_view_t;
 #if defined(ARM64)
 
 typedef uint32_t trap_val_t;
-static trap_val_t trap =  0xD4000003;
-
-// Don't reinject on ARM: SMC is not available to guest
-#define INTERRUPT_REINJECT_VAL 0
+static trap_val_t trap =  0xD4000003; // ARM SMC
 
 #else
 
 static vmi_event_t ss_event[MAX_VCPUS];
 typedef uint8_t trap_val_t;
-static trap_val_t trap = 0xcc;
-#define INTERRUPT_REINJECT_VAL 1
+static trap_val_t trap = 0xcc; // Intel #DB
 
 #endif
 
@@ -72,6 +68,8 @@ typedef struct {
 	uint32_t domain_id;
 	vmi_instance_t vmi;
 
+	addr_t kdtb;
+    
 	uint64_t orig_mem_size;
 	xen_pfn_t max_gpfn;
 
@@ -81,6 +79,7 @@ typedef struct {
 
 //	sem_t shutdown_complete;
 	bool loop_running;
+	bool * ext_nif_busy;
 
 } nif_xen_monitor; // To avoid double pointers
 
@@ -203,12 +202,12 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 		g_hash_table_lookup(xa.pframe_sframe_mappings,
 				    GSIZE_TO_POINTER(event->privcall_event.gfn)));
 	if (0 == shadow) {
-		// No need to reinject since smc is not available to guest
+		// No need to reinject since SMC is not available to guest
 		return VMI_EVENT_RESPONSE_NONE;
 	}
 
 	pgnode = g_hash_table_lookup (xa.shadow_pnode_mappings,
-					   GSIZE_TO_POINTER(shadow));
+				      GSIZE_TO_POINTER(shadow));
 	if (NULL == pgnode) {
 		clog_error (CLOG(CLOGGER_ID), "Can't find pg_node for shadow: %" PRIx64 "", shadow);
 		return VMI_EVENT_RESPONSE_NONE;
@@ -217,8 +216,8 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 	hook_node = g_hash_table_lookup (pgnode->offset_bp_mappings,
 					 GSIZE_TO_POINTER(event->privcall_event.offset));
 	if (NULL == hook_node) {
-		clog_error (CLOG(CLOGGER_ID), "Warning: No BP record found for this offset %" PRIx64 " on page %" PRIx16 "",
-			 event->privcall_event.offset, event->privcall_event.gfn);
+		clog_error (CLOG(CLOGGER_ID), "Warning: No BP record found for this offset %" PRIx64 " on page %" PRIx64 "",
+			    event->privcall_event.offset, event->privcall_event.gfn);
 		return VMI_EVENT_RESPONSE_NONE;
 	}
 
@@ -252,26 +251,29 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 
 	// lookup the gfn -- do we know about it?
 	shadow = (addr_t) GPOINTER_TO_SIZE(
-		g_hash_table_lookup(xa.pframe_sframe_mappings,
-				    GSIZE_TO_POINTER(event->interrupt_event.gfn)));
+		g_hash_table_lookup (xa.pframe_sframe_mappings,
+				     GSIZE_TO_POINTER(event->interrupt_event.gfn)));
 
 	if (0 == shadow) {
-		event->interrupt_event.reinject = INTERRUPT_REINJECT_VAL;
+		clog_warn (CLOG(CLOGGER_ID), "Can't find shadow for gfn=%" PRIx64 ", reinjecting.", shadow);
+		event->interrupt_event.reinject = 1;
 		return VMI_EVENT_RESPONSE_NONE;
 	}
 
-	pgnode = g_hash_table_lookup(xa.shadow_pnode_mappings,
-					  GSIZE_TO_POINTER(shadow));
+	pgnode = g_hash_table_lookup (xa.shadow_pnode_mappings,
+				      GSIZE_TO_POINTER(shadow));
 	if (NULL == pgnode) {
-		clog_error (CLOG(CLOGGER_ID), "Can't find pg_node for shadow: %" PRIx64 "", shadow);
+		clog_warn (CLOG(CLOGGER_ID), "Can't find page node for shadow=%" PRIx64 ", reinjecting.", shadow);
+		event->interrupt_event.reinject = 1;
 		return VMI_EVENT_RESPONSE_NONE;
 	}
 
-	hook_node = g_hash_table_lookup(pgnode->offset_bp_mappings,
-					GSIZE_TO_POINTER(event->interrupt_event.offset));
+	hook_node = g_hash_table_lookup (pgnode->offset_bp_mappings,
+					 GSIZE_TO_POINTER (event->interrupt_event.offset));
 	if (NULL == hook_node) {
-		clog_error (CLOG(CLOGGER_ID), "No hook record found for this offset %" PRIx64 " on page %" PRIx64 "",
-			event->interrupt_event.offset, event->interrupt_event.gfn);
+		clog_error (CLOG(CLOGGER_ID),
+			    "No BP record found for this offset %" PRIx64 " on page %" PRIx64 ", reinjecting.",
+			    event->interrupt_event.offset, event->interrupt_event.gfn);
 		event->interrupt_event.reinject = 1;
 		return VMI_EVENT_RESPONSE_NONE;
 	}
@@ -296,8 +298,10 @@ free_nif_page_node (gpointer data)
 {
 	nif_page_node* pnode = data;
 
-	g_hash_table_destroy(pnode->offset_bp_mappings);
-
+	if (NULL != pnode->offset_bp_mappings) {
+		g_hash_table_destroy(pnode->offset_bp_mappings);
+	}
+	
 	// Stop monitoring
 	vmi_set_mem_event(xa.vmi,
 			  pnode->shadow_frame,
@@ -373,15 +377,16 @@ nif_enable_monitor (addr_t kva,
 	int rc = 0;
 	size_t ret;
 	status_t status;
-	nif_page_node*  pgnode  = NULL;
-	nif_hook_node* hook_node = NULL;
-	addr_t pa, frame;
-	addr_t shadow;
-	addr_t shadow_frame, offset;
+	nif_page_node * pgnode  = NULL;
+	nif_hook_node * hook_node = NULL;
+	addr_t pa, frame, offset;
+	addr_t shadow, shadow_frame;
 	uint8_t buff[DOM_PAGE_SIZE] = {0};
 	addr_t dtb = 0;
 	trap_val_t orig1 = 0;
+#if defined(ARM64)
 	trap_val_t orig2 = 0;
+#endif
 
 	// Read orig values
 	status  = read_trap_val_va (xa.vmi, kva, &orig1);
@@ -393,11 +398,18 @@ nif_enable_monitor (addr_t kva,
 		clog_error (CLOG(CLOGGER_ID), "Failed to read orig val near %" PRIx64 "", kva);
 		goto done;
 	}
-
+/*
 	status = vmi_translate_kv2p (xa.vmi, kva, &pa);
 	if (VMI_SUCCESS != status) {
 		rc = EINVAL;
 		clog_error (CLOG(CLOGGER_ID), "Failed to find PA for VA=%" PRIx64 "", kva);
+		goto done;
+	}
+*/
+	status = vmi_pagetable_lookup (xa.vmi, xa.kdtb, kva, &pa);
+	if (VMI_SUCCESS != status) {
+		rc = EINVAL;
+		clog_error (CLOG(CLOGGER_ID), "Failed to find PA for kernel VA=%" PRIx64 "", kva);
 		goto done;
 	}
 
@@ -411,7 +423,7 @@ nif_enable_monitor (addr_t kva,
 		// Allocate frame if not already there
 		shadow_frame = ++(xa.max_gpfn);
 
-		if (xc_domain_populate_physmap_exact(xa.xci, xa.domain_id, 1, 0,0, (xen_pfn_t*)&shadow_frame) < 0) {
+		if (xc_domain_populate_physmap_exact(xa.xci, xa.domain_id, 1, 0, 0, (xen_pfn_t*)&shadow_frame) < 0) {
 			rc = ENOMEM;
 			clog_error (CLOG(CLOGGER_ID), "Failed to allocate frame at %" PRIx64 "", shadow_frame);
 			goto done;
@@ -435,6 +447,7 @@ nif_enable_monitor (addr_t kva,
 
 	pgnode = g_hash_table_lookup(xa.shadow_pnode_mappings, GSIZE_TO_POINTER(shadow_frame));
 	if (NULL == pgnode) {
+		// Copy orig frame into shadow
 		status = vmi_read_pa(xa.vmi,
 				     MKADDR(frame, 0),
 				     DOM_PAGE_SIZE,
@@ -442,7 +455,7 @@ nif_enable_monitor (addr_t kva,
 				     &ret);
 		if (DOM_PAGE_SIZE != ret || status == VMI_FAILURE) {
 			rc = EACCES;
-			clog_error (CLOG(CLOGGER_ID), "Shadow: Failed to read syscall page");
+			clog_error (CLOG(CLOGGER_ID), "Shadow: Failed to read target page, frame=%lx", frame);
 			goto done;
 		}
 
@@ -461,15 +474,15 @@ nif_enable_monitor (addr_t kva,
 		pgnode               = g_new0(nif_page_node, 1);
 		pgnode->shadow_frame = shadow_frame;
 		pgnode->frame        = frame;
-		pgnode->offset_bp_mappings = g_hash_table_new_full(NULL, NULL,NULL,free_pg_hks_lst);
+		pgnode->offset_bp_mappings = g_hash_table_new_full (NULL, NULL, NULL, free_pg_hks_lst);
 
 		g_hash_table_insert (xa.shadow_pnode_mappings,
 				     GSIZE_TO_POINTER(shadow_frame),
 				     pgnode);
 	} else {
 		// Check for existing hooks: if one exists, we're done
-		hook_node = g_hash_table_lookup(pgnode->offset_bp_mappings,
-						GSIZE_TO_POINTER(offset));
+		hook_node = g_hash_table_lookup (pgnode->offset_bp_mappings,
+						 GSIZE_TO_POINTER(offset));
 		if (NULL != hook_node) {
 			clog_error (CLOG(CLOGGER_ID), "Found hook already in place for va %" PRIx64 "", kva);
 			goto done;
@@ -499,14 +512,17 @@ nif_enable_monitor (addr_t kva,
 
 	// Create new hook node and save it
 	hook_node = g_new0(nif_hook_node, 1);
-	strncpy(hook_node->name, name, MAX_SNAME_LEN);
+	strncpy (hook_node->name, name, MAX_SNAME_LEN);
 	hook_node->parent     = pgnode;
 	hook_node->offset     = offset;
 	hook_node->pre_cb     = pre_cb;
 	hook_node->post_cb    = post_cb;
 	hook_node->cb_arg     = cb_arg;
+
 	hook_node->backup_val1 = orig1;
-	hook_node->backup_val1 = orig2;
+#if defined(ARM64)
+	hook_node->backup_val2 = orig2;
+#endif
 
 	g_hash_table_insert(pgnode->offset_bp_mappings,
 			    GSIZE_TO_POINTER(offset),
@@ -684,8 +700,13 @@ nif_fini(void)
 	// The VM was paused when the loop exited
 
 	fflush (stdout);
-	g_hash_table_destroy (xa.shadow_pnode_mappings);
-	g_hash_table_destroy (xa.pframe_sframe_mappings);
+
+	if (NULL != xa.shadow_pnode_mappings) {
+		g_hash_table_destroy (xa.shadow_pnode_mappings);
+	}
+	if (NULL != xa.pframe_sframe_mappings) {
+		g_hash_table_destroy (xa.pframe_sframe_mappings);
+	}
 
 	destroy_views(xa.domain_id);
 
@@ -699,7 +720,8 @@ nif_fini(void)
 }
 
 int
-nif_init(const char* name)
+nif_init(const char* name,
+	 bool * nif_busy)
 {
 	vmi_event_t trap_event, mem_event, cr3_event;
 	status_t status;
@@ -707,6 +729,9 @@ nif_init(const char* name)
 
 	// Not in event loop yet...
 	xa.loop_running = false;
+	xa.ext_nif_busy = nif_busy;
+
+	*xa.ext_nif_busy = true;
 
 	// Initialize the libvmi library.
 	if (VMI_FAILURE ==
@@ -726,6 +751,8 @@ nif_init(const char* name)
 
 	xa.pframe_sframe_mappings = g_hash_table_new (NULL, NULL);
 	xa.shadow_pnode_mappings = g_hash_table_new_full (NULL, NULL, NULL, free_nif_page_node);
+
+	// Pause the VM here. It is resumed via nif_event_loop() and nif_fini()
 	vmi_pause_vm(xa.vmi);
 
 	if (0 != xc_altp2m_set_domain_state(xa.xci, xa.domain_id, 1)) {
@@ -749,19 +776,12 @@ nif_init(const char* name)
 
 	clog_info (CLOG(CLOGGER_ID), "Altp2m: alt_view1 created and activated");
 
-#if 0 && !defined(ARM64)
-	//Setup a generic mem_access event.
-	SETUP_MEM_EVENT(&mem_event,0,
-			VMI_MEMACCESS_RWX,
-			mem_intchk_cb,1);
-
-	if (VMI_SUCCESS != vmi_register_event(xa.vmi, &mem_event)) {
+	status = vmi_pid_to_dtb (xa.vmi, 0, &xa.kdtb);
+	if (VMI_FAILURE == status) {
 		rc = EIO;
-		clog_error (CLOG(CLOGGER_ID), "Failed to setup memory event");
+		clog_error (CLOG(CLOGGER_ID), "Failed to find kernel page table base");
 		goto exit;
 	}
-#endif
-
 
 exit:
 	return rc;
@@ -780,7 +800,7 @@ nif_stop (void)
 {
 	// Called via signal handler; don't block
 	interrupted = true;
-	clog_info (CLOG(CLOGGER_ID), "Received request to shutdown VMI event loop\n");
+	clog_warn (CLOG(CLOGGER_ID), "Received request to shutdown VMI event loop\n");
 }
 
 
@@ -788,13 +808,14 @@ int
 nif_event_loop (void)
 {
 	int rc = 0;
-	vmi_event_t trap_event, mem_event, cr3_event;
+	vmi_event_t main_event, cr3_event;
 
+	*xa.ext_nif_busy = true;
 
 #if defined(ARM64)
-	SETUP_PRIVCALL_EVENT(&trap_event, _internal_hook_cb);
-	trap_event.data = &xa;
-	if (VMI_SUCCESS != vmi_register_event(xa.vmi, &trap_event)) {
+	SETUP_PRIVCALL_EVENT(&main_event, _internal_hook_cb);
+	main_event.data = &xa;
+	if (VMI_SUCCESS != vmi_register_event(xa.vmi, &main_event)) {
 		clog_error (CLOG(CLOGGER_ID), "Unable to register privcall event");
 		goto exit;
 	}
@@ -804,15 +825,15 @@ nif_event_loop (void)
 		goto exit;
 	}
 
-	SETUP_INTERRUPT_EVENT(&trap_event, 0, _internal_hook_cb);
-	trap_event.data = &xa;
-	if (VMI_SUCCESS != vmi_register_event(xa.vmi, &trap_event)) {
+	SETUP_INTERRUPT_EVENT(&main_event, 0, _internal_hook_cb);
+	main_event.data = &xa;
+	if (VMI_SUCCESS != vmi_register_event(xa.vmi, &main_event)) {
 		clog_error (CLOG(CLOGGER_ID), "Unable to register Interrupt event");
 		goto exit;
 	}
 
 	SETUP_REG_EVENT(&cr3_event, CR3, VMI_REGACCESS_W, 0, cr3_cb);
-	if (VMI_SUCCESS !=vmi_register_event(xa.vmi, &cr3_event)) {
+	if (VMI_SUCCESS != vmi_register_event(xa.vmi, &cr3_event)) {
 		clog_error (CLOG(CLOGGER_ID), "Failed to setup cr3 event");
 		goto exit;
 	}
@@ -824,7 +845,7 @@ nif_event_loop (void)
 	vmi_resume_vm (xa.vmi);
 
 	while (!interrupted) {
-		status_t status = vmi_events_listen (xa.vmi,500);
+		status_t status = vmi_events_listen (xa.vmi, 500);
 		if (status != VMI_SUCCESS) {
 			clog_error (CLOG(CLOGGER_ID), "Some issue in the event_listen loop. Aborting!");
 			interrupted = true;
@@ -835,8 +856,15 @@ nif_event_loop (void)
 	// N.B. There may be a race here, wherein a new event could
 	// have arrived before we pause the VM
 	vmi_pause_vm (xa.vmi);
+
+	vmi_clear_event (xa.vmi, &main_event, NULL);
+#if !defined(ARM64)
+	vmi_clear_event (xa.vmi, &cr3_event, NULL);
+#endif
+	
 	(void) vmi_events_listen (xa.vmi, 1);
 	xa.loop_running = false;
+	*xa.ext_nif_busy = false;
 
 	clog_info (CLOG(CLOGGER_ID), "Exited VMI event loop");
 

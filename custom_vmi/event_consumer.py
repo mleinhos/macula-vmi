@@ -36,7 +36,13 @@ def main():
         msg = subscriber.recv()
         if msg == b'END':
             break
-        msgstr = msg.decode()
+        try:
+            msgstr = msg.decode()
+        except UnicodeDecodeError as e:
+            # skip it
+            print ("Encountered invalid encoding")
+            continue
+
         print (msgstr)
         nbr += 1
 
