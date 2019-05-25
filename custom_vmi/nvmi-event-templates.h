@@ -104,7 +104,7 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
 	  .name = "sys_inotify_add_watch", .argct = 3, true, true, NULL,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
-		    { .type = NVMI_ARG_TYPE_STR    },
+		    { .type = NVMI_ARG_TYPE_PVOID    }, // STR - but doesn't resolve
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,

@@ -430,8 +430,8 @@ nif_enable_monitor (addr_t kva,
 	}
 
 	// shadow_frame is now known
-	clog_info (CLOG(CLOGGER_ID), "shadow %lx shadow_frame %lx for va %lx",
-		 shadow, shadow_frame, kva);
+	clog_debug (CLOG(CLOGGER_ID), "shadow %lx shadow_frame %lx for va %lx",
+		    shadow, shadow_frame, kva);
 
 	pgnode = g_hash_table_lookup(xa.shadow_pnode_mappings, GSIZE_TO_POINTER(shadow_frame));
 	if (NULL == pgnode) {
@@ -483,8 +483,8 @@ nif_enable_monitor (addr_t kva,
 
 	// Write the trap/smc value(s): The first goes in the shadow
 	// page, the second (ARM only) goes in the orig page.
-	clog_info (CLOG(CLOGGER_ID), "Writing trap %x to PA (ARM: and PA+4) %" PRIx64 ", backup1=%x",
-		 trap, shadow, orig1);
+	clog_debug (CLOG(CLOGGER_ID), "Writing trap %x to PA (ARM: and PA+4) %" PRIx64 ", backup1=%x",
+		    trap, shadow, orig1);
 
 	status  = write_trap_val_pa (xa.vmi, MKADDR(shadow_frame, offset), trap);
 #if defined(ARM64)
@@ -511,8 +511,6 @@ nif_enable_monitor (addr_t kva,
 	g_hash_table_insert(pgnode->offset_bp_mappings,
 			    GSIZE_TO_POINTER(offset),
 			    hook_node);
-
-	//clog_info (CLOG(CLOGGER_ID), "\nInside: New bp node inserted with offset %" PRIx64 "", offset);
 done:
 	return rc;
 }
@@ -749,7 +747,6 @@ nif_init(const char* name)
 		goto exit;
 	}
 
-	//clog_info (CLOG(CLOGGER_ID), "Altp2m: alt_view1 created and activated\n");
 	clog_info (CLOG(CLOGGER_ID), "Altp2m: alt_view1 created and activated");
 
 #if 0 && !defined(ARM64)

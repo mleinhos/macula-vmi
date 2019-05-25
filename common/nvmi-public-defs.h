@@ -54,11 +54,11 @@ typedef struct _sock_addr {
 
 
 enum event_types {
-    EVENT_TYPE_NONE = 0,
-    EVENT_TYPE_SYSCALL = 1,
+    EVENT_TYPE_NONE           = 0,
+    EVENT_TYPE_SYSCALL        = 1,
     EVENT_TYPE_PROCESS_CREATE = 2, // process created, or first observed
-    EVENT_TYPE_PROCESS_DEATH = 3, // process died (do_exit called)
-    EVENT_TYPE_FILE_CREATION = 4,
+    EVENT_TYPE_PROCESS_DEATH  = 3, // process died (do_exit called)
+    EVENT_TYPE_FILE_CREATION  = 4,
 };
 
 typedef uint8_t event_type_t;

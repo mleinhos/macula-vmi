@@ -21,6 +21,8 @@
  * This is the maximal set of registers we need to capture upon every event.
  */
 typedef struct _nvmi_registers {
+
+/*
 	union {
 		struct {
 			reg_t cr3; // needed?
@@ -34,7 +36,9 @@ typedef struct _nvmi_registers {
 			reg_t  sp; // needed?
 		} arm64;
 	} arch;
-
+*/
+	reg_t        sp;
+	registers_t  all;
 	reg_t syscall_args[NVMI_MAX_SYSCALL_ARG_CT];
 } nvmi_registers_t;
 
@@ -46,19 +50,28 @@ static int nvmi_syscall_arg_regs[] = { RDI, RSI, RDX, R10, R8, R9 };
 #endif
 
 
+/**
+ * Here's all the data we collect on a process context.
+ */
 typedef struct _nvmi_task_info {
 	addr_t kstack; // base of kernel stack
-	addr_t  task_dtb;
+	addr_t task_dtb;
 
 	union {
 		reg_t key; // the key used to put this into hash table
 		addr_t p_task_struct; // addr of task_struct
 	};
 
-	unsigned long refct;
-	
+	uint64_t uid;
+	uint64_t gid;
+	pid_t pid;
+	char     comm[PROCESS_MAX_COMM_NAME];
+	char     path[PROCESS_MAX_PATH];
+
 	// How many live events reference this task info? Destroyed when 0.
-	process_creation_event_t einfo;
+	unsigned long refct;
+
+//	process_creation_event_t einfo;
 //	vmi_pid_t pid;
 //	vmi_pid_t ppid;
 //	char comm [PROCESS_MAX_COMM_NAME];

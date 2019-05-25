@@ -44,9 +44,9 @@ def main():
         comm =  msgstr[ msgstr.find('proc=') + 5 : ].split()[0]
         pid = int( msgstr[ msgstr.find('pid=') + 4 : ].split()[0])
 
-        if comm == 'ps':
-            print ("Attempting to kill pid {}".format(pid))
-            requestor.send (struct.pack("=l", pid), 0)
+        #if comm == 'ps':
+        #    print ("Attempting to kill pid {}".format(pid))
+        #    requestor.send (struct.pack("=l", pid), 0)
 
         #if nbr % 10 == 0:
         #    print ("Sending value on request channel")
