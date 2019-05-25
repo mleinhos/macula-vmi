@@ -38,6 +38,8 @@
 
 #include <semaphore.h>
 
+#include "clog.h"
+
 typedef uint16_t p2m_view_t;
 #define ALTP2M_INVALID_VIEW (p2m_view_t)(~0)
 
@@ -208,14 +210,14 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 	pgnode = g_hash_table_lookup (xa.shadow_pnode_mappings,
 					   GSIZE_TO_POINTER(shadow));
 	if (NULL == pgnode) {
-		fprintf(stderr, "Can't find pg_node for shadow: %" PRIx64 "\n", shadow);
+		clog_error (CLOG(CLOGGER_ID), "Can't find pg_node for shadow: %" PRIx64 "", shadow);
 		return VMI_EVENT_RESPONSE_NONE;
 	}
 
 	hook_node = g_hash_table_lookup (pgnode->offset_bp_mappings,
 					 GSIZE_TO_POINTER(event->privcall_event.offset));
 	if (NULL == hook_node) {
-		fprintf (stderr, "Warning: No BP record found for this offset %" PRIx64 " on page %" PRIx16 "",
+		clog_error (CLOG(CLOGGER_ID), "Warning: No BP record found for this offset %" PRIx64 " on page %" PRIx16 "",
 			 event->privcall_event.offset, event->privcall_event.gfn);
 		return VMI_EVENT_RESPONSE_NONE;
 	}
@@ -261,14 +263,14 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 	pgnode = g_hash_table_lookup(xa.shadow_pnode_mappings,
 					  GSIZE_TO_POINTER(shadow));
 	if (NULL == pgnode) {
-		fprintf(stderr, "Can't find pg_node for shadow: %" PRIx64 "\n", shadow);
+		clog_error (CLOG(CLOGGER_ID), "Can't find pg_node for shadow: %" PRIx64 "", shadow);
 		return VMI_EVENT_RESPONSE_NONE;
 	}
 
 	hook_node = g_hash_table_lookup(pgnode->offset_bp_mappings,
 					GSIZE_TO_POINTER(event->interrupt_event.offset));
 	if (NULL == hook_node) {
-		fprintf(stderr, "No hook record found for this offset %" PRIx64 " on page %" PRIx64 "\n",
+		clog_error (CLOG(CLOGGER_ID), "No hook record found for this offset %" PRIx64 " on page %" PRIx64 "",
 			event->interrupt_event.offset, event->interrupt_event.gfn);
 		event->interrupt_event.reinject = 1;
 		return VMI_EVENT_RESPONSE_NONE;
@@ -329,7 +331,7 @@ nif_is_monitored(addr_t kva, bool * monitored)
 	status = vmi_translate_kv2p (xa.vmi, kva, &pa);
 	if (VMI_SUCCESS != status) {
 		rc = EINVAL;
-		fprintf(stderr, "Failed to find PA for VA=%" PRIx64 "\n", kva);
+		clog_error (CLOG(CLOGGER_ID), "Failed to find PA for VA=%" PRIx64 "", kva);
 		goto exit;
 	}
 
@@ -388,14 +390,14 @@ nif_enable_monitor (addr_t kva,
 #endif
 	if (VMI_SUCCESS != status) {
 		rc = EACCES;
-		fprintf (stderr, "Failed to read orig val near %" PRIx64 "\n", kva);
+		clog_error (CLOG(CLOGGER_ID), "Failed to read orig val near %" PRIx64 "", kva);
 		goto done;
 	}
 
 	status = vmi_translate_kv2p (xa.vmi, kva, &pa);
 	if (VMI_SUCCESS != status) {
 		rc = EINVAL;
-		fprintf(stderr, "Failed to find PA for VA=%" PRIx64 "\n", kva);
+		clog_error (CLOG(CLOGGER_ID), "Failed to find PA for VA=%" PRIx64 "", kva);
 		goto done;
 	}
 
@@ -411,7 +413,7 @@ nif_enable_monitor (addr_t kva,
 
 		if (xc_domain_populate_physmap_exact(xa.xci, xa.domain_id, 1, 0,0, (xen_pfn_t*)&shadow_frame) < 0) {
 			rc = ENOMEM;
-			fprintf(stderr,"Failed to allocate frame at %" PRIx64 "\n", shadow_frame);
+			clog_error (CLOG(CLOGGER_ID), "Failed to allocate frame at %" PRIx64 "", shadow_frame);
 			goto done;
 		}
 
@@ -422,13 +424,13 @@ nif_enable_monitor (addr_t kva,
 		// Update p2m mapping: alt_view1: frame --> shadow_frame
 		if (0 != xc_altp2m_change_gfn(xa.xci, xa.domain_id, alt_view1, frame, shadow_frame)) {
 			rc = EACCES;
-			fprintf(stderr,"Shadow: Unable to change mapping for alt_view1\n");
+			clog_error (CLOG(CLOGGER_ID), "Shadow: Unable to change mapping for alt_view1\n");
 			goto done;
 		}
 	}
 
 	// shadow_frame is now known
-	fprintf (stderr, "shadow %lx shadow_frame %lx for va %lx\n",
+	clog_info (CLOG(CLOGGER_ID), "shadow %lx shadow_frame %lx for va %lx",
 		 shadow, shadow_frame, kva);
 
 	pgnode = g_hash_table_lookup(xa.shadow_pnode_mappings, GSIZE_TO_POINTER(shadow_frame));
@@ -440,7 +442,7 @@ nif_enable_monitor (addr_t kva,
 				     &ret);
 		if (DOM_PAGE_SIZE != ret || status == VMI_FAILURE) {
 			rc = EACCES;
-			fprintf(stderr,"Shadow: Failed to read syscall page\n");
+			clog_error (CLOG(CLOGGER_ID), "Shadow: Failed to read syscall page");
 			goto done;
 		}
 
@@ -451,7 +453,7 @@ nif_enable_monitor (addr_t kva,
 				      &ret);
 		if (DOM_PAGE_SIZE != ret || status == VMI_FAILURE) {
 			rc = EACCES;
-			fprintf(stderr,"Shadow: Failed to write to shadow page\n");
+			clog_error (CLOG(CLOGGER_ID), "Shadow: Failed to write to shadow page");
 			goto done;
 		}
 
@@ -469,7 +471,7 @@ nif_enable_monitor (addr_t kva,
 		hook_node = g_hash_table_lookup(pgnode->offset_bp_mappings,
 						GSIZE_TO_POINTER(offset));
 		if (NULL != hook_node) {
-			fprintf (stderr, "Found hook already in place for va %" PRIx64 "\n", kva);
+			clog_error (CLOG(CLOGGER_ID), "Found hook already in place for va %" PRIx64 "", kva);
 			goto done;
 		}
 	}
@@ -481,7 +483,7 @@ nif_enable_monitor (addr_t kva,
 
 	// Write the trap/smc value(s): The first goes in the shadow
 	// page, the second (ARM only) goes in the orig page.
-	fprintf (stderr, "Writing trap %x to PA (ARM: and PA+4) %" PRIx64 ", backup1=%x\n",
+	clog_info (CLOG(CLOGGER_ID), "Writing trap %x to PA (ARM: and PA+4) %" PRIx64 ", backup1=%x",
 		 trap, shadow, orig1);
 
 	status  = write_trap_val_pa (xa.vmi, MKADDR(shadow_frame, offset), trap);
@@ -491,7 +493,7 @@ nif_enable_monitor (addr_t kva,
 #endif
 	if (VMI_SUCCESS != status) {
 		rc = EACCES;
-		fprintf (stderr, "Failed to write trap val at orig or shadow page\n");
+		clog_error (CLOG(CLOGGER_ID), "Failed to write trap val at orig or shadow page");
 		goto done;
 	}
 
@@ -510,7 +512,7 @@ nif_enable_monitor (addr_t kva,
 			    GSIZE_TO_POINTER(offset),
 			    hook_node);
 
-	//fprintf(stderr,"\nInside: New bp node inserted with offset %" PRIx64 "", offset);
+	//clog_info (CLOG(CLOGGER_ID), "\nInside: New bp node inserted with offset %" PRIx64 "", offset);
 done:
 	return rc;
 }
@@ -534,17 +536,17 @@ setup_ss_events (vmi_instance_t vmi)
 	int vcpus = vmi_get_num_vcpus(vmi);
 	int rc = 0;
 
-	fprintf(stderr, "Domain vcpus=%d\n", vcpus);
+	clog_info (CLOG(CLOGGER_ID), "Domain vcpus=%d", vcpus);
 
 	if (0 == vcpus) {
 		rc = EIO;
-		fprintf(stderr,"Failed to find the total VCPUs\n");
+		clog_error (CLOG(CLOGGER_ID), "Failed to find the total VCPUs");
 		goto exit;
 	}
 
 	if (vcpus > MAX_VCPUS) {
 		rc = EINVAL;
-		fprintf(stderr,"Guest VCPUS are greater than what we can support\n");
+		clog_error (CLOG(CLOGGER_ID), "Guest VCPUS are greater than what we can support");
 			goto exit;
 	}
 
@@ -553,7 +555,7 @@ setup_ss_events (vmi_instance_t vmi)
 
 		if (VMI_SUCCESS != vmi_register_event(vmi, &ss_event[i])) {
 			rc = EIO;
-			fprintf(stderr,"Failed to register SS event on VCPU failed %d\n", i);
+			clog_error (CLOG(CLOGGER_ID), "Failed to register SS event on VCPU failed %d", i);
 			goto exit;
 		}
 	}
@@ -583,7 +585,7 @@ cr3_cb(vmi_instance_t vmi, vmi_event_t* event)
 static event_response_t
 mem_intchk_cb (vmi_instance_t vmi, vmi_event_t* event)
 {
-	fprintf(stderr,"\nIntegrity check served\n");
+	clog_info (CLOG(CLOGGER_ID), "\nIntegrity check served\n");
 
 	event->slat_id = 0;
 
@@ -597,14 +599,14 @@ static void fini_xen_monitor(void)
 {
 	if (xa.xcx) {
 		if (0 != libxl_ctx_free(xa.xcx)) {
-			fprintf(stderr,"Failed to close xl handle\n");
+			clog_error (CLOG(CLOGGER_ID), "Failed to close xl handle\n");
 		}
 		xa.xcx = NULL;
 	}
 
 	if (xa.xci) {
 		if (0 != xc_interface_close(xa.xci)) {
-			fprintf(stderr,"Failed to close connection to xen interface\n");
+			clog_error (CLOG(CLOGGER_ID), "Failed to close connection to xen interface\n");
 		}
 		xa.xci = NULL;
 	}
@@ -618,13 +620,13 @@ static void destroy_views(uint32_t domain_id)
 	}
 
 	if (0 != xc_altp2m_switch_to_view(xa.xci, domain_id, 0))
-		fprintf(stderr,"Failed to switch to exe view in func destroy_view\n");
+		clog_error (CLOG(CLOGGER_ID), "Failed to switch to exe view in func destroy_view");
 
 	if (alt_view1)
 		xc_altp2m_destroy_view(xa.xci, domain_id, alt_view1);
 
 	if (0 != xc_altp2m_set_domain_state(xa.xci, domain_id, 0))
-		fprintf(stderr,"Failed to disable alternate view for domain_id: %u\n",domain_id);
+		clog_error (CLOG(CLOGGER_ID), "Failed to disable alternate view for domain_id: %u",domain_id);
 }
 
 
@@ -633,36 +635,36 @@ init_xen_monitor(const char* name)
 {
 	int rc = 0;
 	if (0 == (xa.xci = xc_interface_open(NULL, NULL, 0))) {
-		fprintf(stderr,"Failed to open xen interface\n");
+		clog_error (CLOG(CLOGGER_ID), "Failed to open xen interface\n");
 		return EIO; // nothing to clean
 	}
 
 	if (libxl_ctx_alloc(&xa.xcx, LIBXL_VERSION, 0, NULL)) {
 		rc = ENOMEM;
-		fprintf(stderr,"Unable to create xl context\n");
+		clog_error (CLOG(CLOGGER_ID), "Unable to create xl context\n");
 		goto clean;
 	}
 
 
 	if ( libxl_name_to_domid(xa.xcx, name, &xa.domain_id)) {
 		rc = EINVAL;
-		fprintf(stderr,"Unable to get domain id for %s\n", name);
+		clog_error (CLOG(CLOGGER_ID), "Unable to get domain id for %s\n", name);
 		goto clean;
 	}
 
 	if (0 == (xa.orig_mem_size = vmi_get_memsize(xa.vmi))) {
 		rc = EIO;
-		fprintf(stderr,"Failed to get domain memory size\n");
+		clog_error (CLOG(CLOGGER_ID), "Failed to get domain memory size\n");
 		goto clean;
 	}
 
 	if (xc_domain_maximum_gpfn(xa.xci, xa.domain_id, &xa.max_gpfn) < 0) {
 		rc = EIO;
-		fprintf(stderr,"Failed to get max gpfn for the domain\n");
+		clog_error (CLOG(CLOGGER_ID), "Failed to get max gpfn for the domain\n");
 		goto clean;
 	}
 
-	//fprintf(stderr,"\nMax gfn:%" PRIx64 "",xa.max_gpfn);
+	//clog_info (CLOG(CLOGGER_ID), "\nMax gfn:%" PRIx64 "",xa.max_gpfn);
 	return 0;
 
 clean:
@@ -673,13 +675,13 @@ clean:
 void
 nif_fini(void)
 {
-	fprintf (stderr, "Waiting for Xen event loop to shut down...\n");
+	clog_info (CLOG(CLOGGER_ID), "Waiting for Xen event loop to shut down...");
 	while (xa.loop_running) {
 		// Keep yielding until the loop completes
 		usleep (1);
 	}
 	assert (!xa.loop_running);
-	fprintf (stderr, "Xen event loop has shut down...\n");
+	clog_info (CLOG(CLOGGER_ID), "Xen event loop has shut down...");
 
 	// The VM was paused when the loop exited
 
@@ -713,7 +715,7 @@ nif_init(const char* name)
 	    vmi_init_complete(&xa.vmi, (void*)name, VMI_INIT_DOMAINNAME| VMI_INIT_EVENTS,NULL,
 			      VMI_CONFIG_GLOBAL_FILE_ENTRY, NULL, NULL)) {
 		rc = EIO;
-		fprintf(stderr,"Failed to init LibVMI library.\n");
+		clog_error (CLOG(CLOGGER_ID), "Failed to init LibVMI library.\n");
 		goto exit;
 	}
 
@@ -722,38 +724,33 @@ nif_init(const char* name)
 		goto exit;
 	}
 
-	fprintf(stderr,"\n\t\t\tNumen Introspection Framework v2.0\n\n");
+	fprintf (stderr, "\n\t\t\tNumen Introspection Framework v2.0\n\n");
 
 	xa.pframe_sframe_mappings = g_hash_table_new (NULL, NULL);
 	xa.shadow_pnode_mappings = g_hash_table_new_full (NULL, NULL, NULL, free_nif_page_node);
-/*	rc = sem_init (&xa.shutdown_complete, 0, 0);
-	if (rc) {
-		fprintf (stderr, "sem_init() failed\n");
-		goto exit;
-	}
-*/	
 	vmi_pause_vm(xa.vmi);
 
 	if (0 != xc_altp2m_set_domain_state(xa.xci, xa.domain_id, 1)) {
 		rc = EIO;
-		fprintf(stderr,"Failed to enable altp2m for domain_id: %u\n", xa.domain_id);
+		clog_error (CLOG(CLOGGER_ID), "Failed to enable altp2m for domain_id: %u\n", xa.domain_id);
 		goto exit;
 	}
 
 	if (0 != xc_altp2m_create_view(xa.xci, xa.domain_id, 0, &alt_view1)) {
 		rc = EIO;
-		fprintf(stderr,"Failed to create execute view\n");
+		clog_error (CLOG(CLOGGER_ID), "Failed to create execute view\n");
 		goto exit;
 	}
 
 
 	if (0 != xc_altp2m_switch_to_view(xa.xci, xa.domain_id, alt_view1)) {
 		rc = EIO;
-		fprintf(stderr,"Failed to switch to execute view id:%u\n", alt_view1);
+		clog_error (CLOG(CLOGGER_ID), "Failed to switch to execute view id:%u\n", alt_view1);
 		goto exit;
 	}
 
-	fprintf(stderr, "Altp2m: alt_view1 created and activated\n");
+	//clog_info (CLOG(CLOGGER_ID), "Altp2m: alt_view1 created and activated\n");
+	clog_info (CLOG(CLOGGER_ID), "Altp2m: alt_view1 created and activated");
 
 #if 0 && !defined(ARM64)
 	//Setup a generic mem_access event.
@@ -763,12 +760,12 @@ nif_init(const char* name)
 
 	if (VMI_SUCCESS != vmi_register_event(xa.vmi, &mem_event)) {
 		rc = EIO;
-		fprintf(stderr,"Failed to setup memory event\n");
+		clog_error (CLOG(CLOGGER_ID), "Failed to setup memory event");
 		goto exit;
 	}
 #endif
 
-	
+
 exit:
 	return rc;
 }
@@ -786,7 +783,7 @@ nif_stop (void)
 {
 	// Called via signal handler; don't block
 	interrupted = true;
-	fprintf (stderr, "Received request to shutdown VMI event loop\n");
+	clog_info (CLOG(CLOGGER_ID), "Received request to shutdown VMI event loop\n");
 }
 
 
@@ -801,7 +798,7 @@ nif_event_loop (void)
 	SETUP_PRIVCALL_EVENT(&trap_event, _internal_hook_cb);
 	trap_event.data = &xa;
 	if (VMI_SUCCESS != vmi_register_event(xa.vmi, &trap_event)) {
-		fprintf(stderr,"\nUnable to register privcall event");
+		clog_error (CLOG(CLOGGER_ID), "Unable to register privcall event");
 		goto exit;
 	}
 #else
@@ -813,26 +810,26 @@ nif_event_loop (void)
 	SETUP_INTERRUPT_EVENT(&trap_event, 0, _internal_hook_cb);
 	trap_event.data = &xa;
 	if (VMI_SUCCESS != vmi_register_event(xa.vmi, &trap_event)) {
-		fprintf(stderr,"\nUnable to register Interrupt event");
+		clog_error (CLOG(CLOGGER_ID), "Unable to register Interrupt event");
 		goto exit;
 	}
 
 	SETUP_REG_EVENT(&cr3_event, CR3, VMI_REGACCESS_W, 0, cr3_cb);
 	if (VMI_SUCCESS !=vmi_register_event(xa.vmi, &cr3_event)) {
-		fprintf(stderr,"Failed to setup cr3 event\n");
+		clog_error (CLOG(CLOGGER_ID), "Failed to setup cr3 event");
 		goto exit;
 	}
 	vmi_register_event(xa.vmi, &cr3_event);
 #endif
 
-	fprintf (stderr, "Entering VMI event loop\n");
+	clog_info (CLOG(CLOGGER_ID), "Entering VMI event loop");
 	xa.loop_running = true;
 	vmi_resume_vm (xa.vmi);
 
 	while (!interrupted) {
 		status_t status = vmi_events_listen (xa.vmi,500);
 		if (status != VMI_SUCCESS) {
-			fprintf(stderr,"Some issue in the event_listen loop. Aborting!\n\n");
+			clog_error (CLOG(CLOGGER_ID), "Some issue in the event_listen loop. Aborting!");
 			interrupted = true;
 			rc = EBUSY;
 		}
@@ -843,8 +840,8 @@ nif_event_loop (void)
 	vmi_pause_vm (xa.vmi);
 	(void) vmi_events_listen (xa.vmi, 1);
 	xa.loop_running = false;
-		
-	fprintf (stderr, "Exited VMI event loop\n");
+
+	clog_info (CLOG(CLOGGER_ID), "Exited VMI event loop");
 
 exit:
 //	sem_post (&xa.shutdown_complete);
@@ -856,6 +853,6 @@ exit:
 int
 nif_start_event_loop (void)
 {
-	
+
 }
 */
