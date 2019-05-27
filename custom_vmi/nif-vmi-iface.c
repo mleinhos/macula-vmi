@@ -485,7 +485,7 @@ nif_enable_monitor (addr_t kva,
 	// TODO: experiment with the second callback: can we change it
 	// to be notified on an access to schedule() / __schedule()
 	// rather than the very next instruction? This applies to
-	// Intel too -- is a second #BPE faster than single stepping?
+	// Intel too -- is a second #BP faster than single stepping?
 
 	// Write the trap/smc value(s): The first goes in the shadow
 	// page, the second (ARM only) goes in the orig page.
