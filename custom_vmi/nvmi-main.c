@@ -401,6 +401,8 @@ cb_build_task_context (vmi_instance_t vmi,
 		 (uint32_t) (*tinfo)->pid,
 		 (*tinfo)->task_dtb);
 #endif
+	clog_debug (CLOG(CLOGGER_ID), "Discovered context: task key=%lx pid=%d comm=%s",
+		    curr_task, (*tinfo)->pid, (*tinfo)->comm);
 
 exit:
 	return rc;
@@ -438,8 +440,8 @@ cb_gather_context (vmi_instance_t vmi,
 		goto exit;
 	}
 
-	// Look for key in gstate.context_lookup. If it isn't there,
-	// then allocate new nvmi_task_info_t and populate it. 
+	// Look for key in known contexts. If it isn't there, allocate
+	// new nvmi_task_info_t and populate it.
 	task = g_hash_table_lookup (gstate.context_lookup, (gpointer)curr_task);
 	if (NULL == task) {
 		// build new context
@@ -532,7 +534,7 @@ read_user_mem (vmi_instance_t vmi,
 
 	access_context_t ctx = { .translate_mechanism = VMI_TM_PROCESS_DTB,
 				 .dtb = dtb,
-				 // .dtb = evt->r.arch.arm64.ttbr1,
+				 // .dtb = evt->r.arch.arm64.ttbr0,
 				 .addr = va };
 	// better to read directly into caller buffer
 
@@ -1107,7 +1109,7 @@ nvmi_event_consumer (gpointer data)
 		//		deref_task_context ((gpointer)&evt->task);
 		//		__sync_fetch_and_sub (&evt->task->refct, 1);
 
-		deref_task_context ((gpointer) evt->task);
+		//deref_task_context ((gpointer) evt->task);
 		g_slice_free (nvmi_event_t, evt);
 	} // while
 
