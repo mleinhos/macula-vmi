@@ -279,6 +279,14 @@ deref_task_context (gpointer arg)
 	}
 }
 
+
+static void
+free_task_context (nvmi_task_info_t * tinfo)
+{
+	g_slice_free (nvmi_task_info_t, tinfo);
+}
+
+
 static int
 cb_current_task (vmi_instance_t vmi,
 		  vmi_event_t * vmievent,
@@ -459,7 +467,7 @@ cb_gather_context (vmi_instance_t vmi,
 		atomic_inc (&task->refct);
 
 		task->key = curr_task;
-		g_hash_table_insert (gstate.context_lookup, (gpointer)task->key, task);
+//		g_hash_table_insert (gstate.context_lookup, (gpointer)task->key, task);
 		// The table owns a reference to the task context.
 //		atomic_inc (&task->refct);
 	}
@@ -1110,6 +1118,7 @@ nvmi_event_consumer (gpointer data)
 		//		__sync_fetch_and_sub (&evt->task->refct, 1);
 
 		//deref_task_context ((gpointer) evt->task);
+		free_task_context (evt->task);
 		g_slice_free (nvmi_event_t, evt);
 	} // while
 
