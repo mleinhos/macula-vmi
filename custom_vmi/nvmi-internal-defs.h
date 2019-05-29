@@ -34,23 +34,6 @@ typedef struct _nvmi_registers {
 			reg_t sp;
 		} x86;
 	};
-/*
-	union {
-		struct {
-			reg_t cr3; // needed?
-			reg_t  sp;
-			reg_t  gs_base;
-		} intel;
-		struct {
-			reg_t ttbr0;
-			reg_t ttbr1;
-			reg_t sp_el0;
-			reg_t  sp; // needed?
-		} arm64;
-	} arch;
-*/
-
-//	registers_t  all;
 	reg_t syscall_args[NVMI_MAX_SYSCALL_ARG_CT];
 } nvmi_registers_t;
 
@@ -76,17 +59,12 @@ typedef struct _nvmi_task_info {
 
 	uint64_t uid;
 	uint64_t gid;
-	pid_t pid;
+	vmi_pid_t pid;
 	char     comm[PROCESS_MAX_COMM_NAME];
 	char     path[PROCESS_MAX_PATH];
 
 	// How many live events reference this task info? Destroyed when 0.
 	unsigned long refct;
-
-//	process_creation_event_t einfo;
-//	vmi_pid_t pid;
-//	vmi_pid_t ppid;
-//	char comm [PROCESS_MAX_COMM_NAME];
 
 	// TODO: get full path to binary via task->mm->??, since it's a file-backed mmap()
 	

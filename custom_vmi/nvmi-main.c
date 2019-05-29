@@ -340,7 +340,7 @@ cb_build_task_context (vmi_instance_t vmi,
 	status = vmi_read_32_va(vmi,
 				curr_task + gstate.task_pid_ofs,
 				0,
-				(uint32_t *) &(*tinfo)->pid);
+				&(*tinfo)->pid);
 	if (VMI_FAILURE == status) {
 		rc = EFAULT;
 		clog_warn (CLOG(CLOGGER_ID), "Failed to read task's pid at %" PRIx64 " + %lx",
@@ -357,7 +357,7 @@ cb_build_task_context (vmi_instance_t vmi,
 		clog_warn (CLOG(CLOGGER_ID), "Failed to read task's comm at %" PRIx64 " + %lx",
 			 (*tinfo)->p_task_struct, gstate.task_name_ofs);
 		goto exit;
-	}
+pp	}
 
 	strncpy ((*tinfo)->comm, pname, sizeof((*tinfo)->comm));
 	free (pname);
@@ -1180,10 +1180,10 @@ nvmi_main_init (void)
 						       NULL, // key destroy
 						       NULL); //deref_task_context); // TODO: impl ctx refct
 
-	status |= vmi_get_offset (vmi, "linux_name", &gstate.task_name_ofs);
-	status |= vmi_get_offset (vmi, "linux_pid",  &gstate.task_pid_ofs);
-	status |= vmi_get_kernel_struct_offset (vmi, "task_struct", "mm", &gstate.task_mm_ofs);
-	status |= vmi_get_kernel_struct_offset (vmi, "mm_struct", "pgd", &gstate.mm_pgd_ofs);
+	status |= vmi_get_kernel_struct_offset (vmi, "task_struct", "comm", &gstate.task_name_ofs);
+	status |= vmi_get_kernel_struct_offset (vmi, "task_struct", "pid",  &gstate.task_pid_ofs);
+	status |= vmi_get_kernel_struct_offset (vmi, "task_struct", "mm",   &gstate.task_mm_ofs);
+	status |= vmi_get_kernel_struct_offset (vmi, "mm_struct",   "pgd",  &gstate.mm_pgd_ofs);
 
 	if (VMI_FAILURE == status) {
 		clog_warn (CLOG(CLOGGER_ID), "Failed to get offset");
