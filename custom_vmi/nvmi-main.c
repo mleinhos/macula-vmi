@@ -357,7 +357,7 @@ cb_build_task_context (vmi_instance_t vmi,
 		clog_warn (CLOG(CLOGGER_ID), "Failed to read task's comm at %" PRIx64 " + %lx",
 			 (*tinfo)->p_task_struct, gstate.task_name_ofs);
 		goto exit;
-pp	}
+	}
 
 	strncpy ((*tinfo)->comm, pname, sizeof((*tinfo)->comm));
 	free (pname);
