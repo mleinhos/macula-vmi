@@ -206,7 +206,7 @@ cb_gather_registers (vmi_instance_t vmi,
 			rc = EIO;
 			goto exit;
 		}
-		clog_debug (CLOG(CLOGGER_ID), "syscall arg %d = %lx", i, regs->syscall_args[i]);
+		//clog_debug (CLOG(CLOGGER_ID), "syscall arg %d = %lx", i, regs->syscall_args[i]);
 	}
 
 	// Get the rest of the context too, for context lookup. Beware KPTI!!
@@ -288,6 +288,55 @@ free_task_context (nvmi_task_info_t * tinfo)
 
 
 static int
+cb_current_pid  (vmi_instance_t vmi,
+		 vmi_event_t * vmievent,
+		 nvmi_registers_t * regs,
+		 addr_t * curr,
+		 vmi_pid_t * pid)
+{
+	int rc = 0;
+//	addr_t curr = 0;
+	status_t status = VMI_SUCCESS;
+	addr_t local_curr = 0;
+	vmi_pid_t local_pid = 0;
+
+#if defined(ARM64)
+	// Fast: get current task_struct *
+
+	// TODO: it's not clear that this works - we're seeing that
+	// SP_EL0 has the same value across different contexts!
+	local_curr = (addr_t) regs->arm.sp_el0;
+#else
+	// gs --> 64 bit, fs --> 32 bit
+	status = vmi_read_addr_va(vmi,
+				  regs->x86.r.gs_base + gstate.va_current_task,
+				  0,
+				  &local_curr);
+	if (VMI_SUCCESS != status) {
+		rc = EIO;
+		clog_warn (CLOG(CLOGGER_ID), "Failed to determine current task (from gs_base + curr_task_offset)");
+		goto exit;
+	}
+#endif
+
+	// Get current->pid
+	status = vmi_read_32_va(vmi, local_curr + gstate.task_pid_ofs, 0, &local_pid);
+	if (VMI_FAILURE == status) {
+		rc = EFAULT;
+		clog_warn (CLOG(CLOGGER_ID), "Failed to read task's pid at %" PRIx64 " + %lx",
+			   local_curr, gstate.task_pid_ofs);
+		goto exit;
+	}
+
+exit:
+	*curr = local_curr;
+	*pid = local_pid;
+	return rc;
+}
+
+
+	
+static int
 cb_current_task (vmi_instance_t vmi,
 		  vmi_event_t * vmievent,
 		  nvmi_registers_t * regs,
@@ -297,7 +346,26 @@ cb_current_task (vmi_instance_t vmi,
 
 #if defined(ARM64)
 	// Fast: get current task_struct *
+
+	// TODO: it's not clear that this works - we're seeing that
+	// SP_EL0 has the same value across different contexts!
 	*task = regs->arm.sp_el0;
+
+#if 0
+	// Get current->pid
+	status = vmi_read_32_va(vmi,
+				curr_task + gstate.task_pid_ofs,
+				0,
+				&(*tinfo)->pid);
+	if (VMI_FAILURE == status) {
+		rc = EFAULT;
+		clog_warn (CLOG(CLOGGER_ID), "Failed to read task's pid at %" PRIx64 " + %lx",
+			 (*tinfo)->task_struct, gstate.task_pid_ofs);
+		goto exit;
+	}
+#endif
+
+	
 #else
 	// x86: slow
 	// key = regs->arch.intel.sp & NVMI_KSTACK_MASK;
@@ -323,6 +391,7 @@ static int
 cb_build_task_context (vmi_instance_t vmi,
 		       nvmi_registers_t * regs,
 		       addr_t curr_task,
+		       vmi_pid_t pid,
 		       nvmi_task_info_t ** tinfo)
 {
 	int rc = 0;
@@ -342,8 +411,9 @@ cb_build_task_context (vmi_instance_t vmi,
 #else
 	(*tinfo)->kstack = regs->x86.sp & NVMI_KSTACK_MASK;
 #endif
-	(*tinfo)->p_task_struct = curr_task;
+	(*tinfo)->task_struct = curr_task;
 
+#if 0
 	// Get current->pid
 	status = vmi_read_32_va(vmi,
 				curr_task + gstate.task_pid_ofs,
@@ -352,21 +422,25 @@ cb_build_task_context (vmi_instance_t vmi,
 	if (VMI_FAILURE == status) {
 		rc = EFAULT;
 		clog_warn (CLOG(CLOGGER_ID), "Failed to read task's pid at %" PRIx64 " + %lx",
-			 (*tinfo)->p_task_struct, gstate.task_pid_ofs);
+			 (*tinfo)->task_struct, gstate.task_pid_ofs);
 		goto exit;
 	}
+#endif
+
+	(*tinfo)->pid = pid;
 
 	// Get current->comm
-	pname = vmi_read_str_va (vmi,
-				 (*tinfo)->p_task_struct + gstate.task_name_ofs,
-				 0);
+	// TODO: This is wrong
+	pname = vmi_read_str_va (vmi, curr_task + gstate.task_name_ofs, 0);
 	if (NULL == pname) {
 		rc = EFAULT;
 		clog_warn (CLOG(CLOGGER_ID), "Failed to read task's comm at %" PRIx64 " + %lx",
-			 (*tinfo)->p_task_struct, gstate.task_name_ofs);
+			 (*tinfo)->task_struct, gstate.task_name_ofs);
 		goto exit;
 	}
 
+	clog_info (CLOG(CLOGGER_ID), "pid %d --> task %p, comm %s", pid, curr_task, pname);
+	
 	strncpy ((*tinfo)->comm, pname, sizeof((*tinfo)->comm));
 	free (pname);
 
@@ -409,7 +483,7 @@ cb_build_task_context (vmi_instance_t vmi,
 		 (uint32_t) (*tinfo)->pid,
 		 (*tinfo)->task_dtb);
 #endif
-	clog_debug (CLOG(CLOGGER_ID), "Discovered context: task key=%lx pid=%d comm=%s",
+	clog_debug (CLOG(CLOGGER_ID), "Build context: task=%lx (key) pid=%d comm=%s",
 		    curr_task, (*tinfo)->pid, (*tinfo)->comm);
 
 exit:
@@ -432,17 +506,19 @@ cb_gather_context (vmi_instance_t vmi,
 {
 	int rc = 0;
 	status_t status = VMI_SUCCESS;
-	addr_t curr_task = 0;
 	nvmi_task_info_t * task = NULL;
 	nvmi_event_t * evt = (nvmi_event_t *) g_slice_new0 (nvmi_event_t);
 	int argct = (NULL == cbi ? 0 : cbi->argct);
+	addr_t curr = 0;
+	vmi_pid_t pid = 0;
 
 	rc = cb_gather_registers (vmi, vmievent, &evt->r, argct);
 	if (rc) {
 		goto exit;
 	}
 
-	rc = cb_current_task (vmi, vmievent, &evt->r, &curr_task);
+	rc = cb_current_pid (vmi, vmievent, &evt->r, &curr, &pid);
+//	rc = cb_current_task (vmi, vmievent, &evt->r, &curr);
 	if (rc) {
 		clog_warn (CLOG(CLOGGER_ID), "Context could not be found");
 		goto exit;
@@ -450,10 +526,17 @@ cb_gather_context (vmi_instance_t vmi,
 
 	// Look for key in known contexts. If it isn't there, allocate
 	// new nvmi_task_info_t and populate it.
-	task = g_hash_table_lookup (gstate.context_lookup, (gpointer)curr_task);
+	// TODO: enable caching by figuring out why it's broken on ARM (current != our key)
+//	task = g_hash_table_lookup (gstate.context_lookup, (gpointer)curr);
+	task = g_hash_table_lookup (gstate.context_lookup, (gpointer)(unsigned long)pid);
+
+	if (task && task->pid != pid) asm("int $3");
+
+	clog_info (CLOG(CLOGGER_ID), "pid %d --> task %p", pid, task);
+	
 	if (NULL == task) {
 		// build new context
-		rc = cb_build_task_context (vmi, &evt->r, curr_task, &task);
+		rc = cb_build_task_context (vmi, &evt->r, curr, pid, &task);
 		if (rc) {
 			if (0 == task->pid) {
 				goto exit;
@@ -466,8 +549,9 @@ cb_gather_context (vmi_instance_t vmi,
 		// The system owns a reference. When the task dies, we remove it.
 		atomic_inc (&task->refct);
 
-		task->key = curr_task;
-//		g_hash_table_insert (gstate.context_lookup, (gpointer)task->key, task);
+		task->key = pid;
+//		task->task_struct = task;
+		g_hash_table_insert (gstate.context_lookup, (gpointer)task->key, task);
 		// The table owns a reference to the task context.
 //		atomic_inc (&task->refct);
 	}
@@ -1118,7 +1202,7 @@ nvmi_event_consumer (gpointer data)
 		//		__sync_fetch_and_sub (&evt->task->refct, 1);
 
 		//deref_task_context ((gpointer) evt->task);
-		free_task_context (evt->task);
+//		free_task_context (evt->task);
 		g_slice_free (nvmi_event_t, evt);
 	} // while
 

@@ -20,8 +20,8 @@
 /**
  * This is the maximal set of registers we need to capture upon every event.
  */
-typedef struct _nvmi_registers {
-
+typedef struct _nvmi_registers
+{
 	union {
 		struct {
 			arm_registers_t r;
@@ -48,20 +48,19 @@ static int nvmi_syscall_arg_regs[] = { RDI, RSI, RDX, R10, R8, R9 };
 /**
  * Here's all the data we collect on a process context.
  */
-typedef struct _nvmi_task_info {
-	addr_t kstack; // base of kernel stack
-	addr_t task_dtb;
+typedef struct _nvmi_task_info
+{
+	addr_t     kstack;      // base of kernel stack
+	addr_t     task_dtb;
 
-	union {
-		reg_t key; // the key used to put this into hash table
-		addr_t p_task_struct; // addr of task_struct
-	};
+	addr_t     key;         // the key used to put this into hash table
+	addr_t     task_struct; // addr of task_struct
 
-	uint64_t uid;
-	uint64_t gid;
-	vmi_pid_t pid;
-	char     comm[PROCESS_MAX_COMM_NAME];
-	char     path[PROCESS_MAX_PATH];
+	uint64_t   uid;
+	uint64_t   gid;
+	vmi_pid_t  pid;
+	char       comm[PROCESS_MAX_COMM_NAME];
+	char       path[PROCESS_MAX_PATH];
 
 	// How many live events reference this task info? Destroyed when 0.
 	unsigned long refct;
@@ -71,12 +70,14 @@ typedef struct _nvmi_task_info {
 } nvmi_task_info_t;
 
 // TODO: exapnd for other event types
-typedef struct _nvmi_event {
+typedef struct _nvmi_event
+{
 	nvmi_registers_t r;
-	//nvmi_syscall_def_t * sc;
 
 	// metadata about the event
 	nvmi_cb_info_t * cbi;
+
+	// task context of the event
 	nvmi_task_info_t * task;
 
 	// If we must collect process memory during the first callback...
@@ -84,7 +85,7 @@ typedef struct _nvmi_event {
 	// ... track its offsets into "mem" field here
 	int mem_ofs[NVMI_MAX_SYSCALL_ARG_CT];
 	int arg_lens[NVMI_MAX_SYSCALL_ARG_CT];
-	
+
 	// ...and put it here
 	uint8_t mem[NVMI_MAX_ARG_MEM];
 } nvmi_event_t;
