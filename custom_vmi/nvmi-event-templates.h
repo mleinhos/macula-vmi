@@ -50,6 +50,8 @@ typedef struct _nvmi_cb_info {
 
 	// syscall specific
 	int argct;
+
+	// TODO: use bitfield, add flag for execve to invalidate cached context
 	bool does_deref;
 	bool enabled;
 	void * rtinfo; // runtime info
@@ -171,6 +173,12 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 	  .args = { { .type = NVMI_ARG_TYPE_STR },
 		    { .type = NVMI_ARG_TYPE_SCALAR } ,
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
+
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_execve", .argct = 3, true, true, NULL,
+	  .args = { { .type = NVMI_ARG_TYPE_STR }, // filename
+		    { .type = NVMI_ARG_TYPE_PVOID } , // char * argv[]
+		    { .type = NVMI_ARG_TYPE_PVOID } } }, // char * envp[]
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
 	  .name = "sys_getuid",  .argct = 0, false, true, NULL, .args = {} },

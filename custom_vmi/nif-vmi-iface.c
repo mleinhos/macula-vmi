@@ -69,7 +69,7 @@ typedef struct {
 	vmi_instance_t vmi;
 
 	addr_t kdtb;
-    
+
 	uint64_t orig_mem_size;
 	xen_pfn_t max_gpfn;
 
@@ -291,7 +291,7 @@ free_nif_page_node (gpointer data)
 	if (NULL != pnode->offset_bp_mappings) {
 		g_hash_table_destroy(pnode->offset_bp_mappings);
 	}
-	
+
 	// Stop monitoring
 	vmi_set_mem_event(xa.vmi,
 			  pnode->shadow_frame,

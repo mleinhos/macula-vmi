@@ -148,7 +148,7 @@ logger_init (const char * logfile,
 	} else {
 		fprintf (stderr, "Initializing logging to stderr, verbosity=%d\n",
 			 verbosity_level);
-		rc = clog_init_fd (CLOGGER_ID, fileno(stderr));		
+		rc = clog_init_fd (CLOGGER_ID, fileno(stderr));
 	}
 	if (rc) {
 		fprintf (stderr, "Logger initialization failure\n");
@@ -335,7 +335,7 @@ exit:
 }
 
 
-	
+
 static int
 cb_current_task (vmi_instance_t vmi,
 		  vmi_event_t * vmievent,
@@ -365,7 +365,7 @@ cb_current_task (vmi_instance_t vmi,
 	}
 #endif
 
-	
+
 #else
 	// x86: slow
 	// key = regs->arch.intel.sp & NVMI_KSTACK_MASK;
@@ -391,7 +391,7 @@ static int
 cb_build_task_context (vmi_instance_t vmi,
 		       nvmi_registers_t * regs,
 		       addr_t curr_task,
-		       vmi_pid_t pid,
+//		       vmi_pid_t pid,
 		       nvmi_task_info_t ** tinfo)
 {
 	int rc = 0;
@@ -413,7 +413,7 @@ cb_build_task_context (vmi_instance_t vmi,
 #endif
 	(*tinfo)->task_struct = curr_task;
 
-#if 0
+#if 1
 	// Get current->pid
 	status = vmi_read_32_va(vmi,
 				curr_task + gstate.task_pid_ofs,
@@ -427,7 +427,7 @@ cb_build_task_context (vmi_instance_t vmi,
 	}
 #endif
 
-	(*tinfo)->pid = pid;
+//	(*tinfo)->pid = pid;
 
 	// Get current->comm
 	// TODO: This is wrong
@@ -439,8 +439,10 @@ cb_build_task_context (vmi_instance_t vmi,
 		goto exit;
 	}
 
-	clog_info (CLOG(CLOGGER_ID), "pid %d --> task %p, comm %s", pid, curr_task, pname);
-	
+//	clog_info (CLOG(CLOGGER_ID), "pid %d --> task %p, comm %s", pid, curr_task, pname);
+	clog_info (CLOG(CLOGGER_ID), "pid %d --> task %p, comm %s",
+		   (*tinfo)->pid, curr_task, pname);
+
 	strncpy ((*tinfo)->comm, pname, sizeof((*tinfo)->comm));
 	free (pname);
 
@@ -510,15 +512,15 @@ cb_gather_context (vmi_instance_t vmi,
 	nvmi_event_t * evt = (nvmi_event_t *) g_slice_new0 (nvmi_event_t);
 	int argct = (NULL == cbi ? 0 : cbi->argct);
 	addr_t curr = 0;
-	vmi_pid_t pid = 0;
+//	vmi_pid_t pid = 0;
 
 	rc = cb_gather_registers (vmi, vmievent, &evt->r, argct);
 	if (rc) {
 		goto exit;
 	}
 
-	rc = cb_current_pid (vmi, vmievent, &evt->r, &curr, &pid);
-//	rc = cb_current_task (vmi, vmievent, &evt->r, &curr);
+//	rc = cb_current_pid (vmi, vmievent, &evt->r, &curr, &pid);
+	rc = cb_current_task (vmi, vmievent, &evt->r, &curr);
 	if (rc) {
 		clog_warn (CLOG(CLOGGER_ID), "Context could not be found");
 		goto exit;
@@ -527,16 +529,17 @@ cb_gather_context (vmi_instance_t vmi,
 	// Look for key in known contexts. If it isn't there, allocate
 	// new nvmi_task_info_t and populate it.
 	// TODO: enable caching by figuring out why it's broken on ARM (current != our key)
-//	task = g_hash_table_lookup (gstate.context_lookup, (gpointer)curr);
-	task = g_hash_table_lookup (gstate.context_lookup, (gpointer)(unsigned long)pid);
+	task = g_hash_table_lookup (gstate.context_lookup, (gpointer)curr);
+	//task = g_hash_table_lookup (gstate.context_lookup, (gpointer)(unsigned long)pid);
 
-	if (task && task->pid != pid) asm("int $3");
+//	if (task && task->pid != pid) asm("int $3");
 
-	clog_info (CLOG(CLOGGER_ID), "pid %d --> task %p", pid, task);
-	
+//	clog_info (CLOG(CLOGGER_ID), "pid %d --> task %p", pid, task);
+
 	if (NULL == task) {
 		// build new context
-		rc = cb_build_task_context (vmi, &evt->r, curr, pid, &task);
+		//rc = cb_build_task_context (vmi, &evt->r, curr, pid, &task);
+		rc = cb_build_task_context (vmi, &evt->r, curr, &task);
 		if (rc) {
 			if (0 == task->pid) {
 				goto exit;
@@ -549,7 +552,8 @@ cb_gather_context (vmi_instance_t vmi,
 		// The system owns a reference. When the task dies, we remove it.
 		atomic_inc (&task->refct);
 
-		task->key = pid;
+//		task->key = pid;
+		task->key = curr;
 //		task->task_struct = task;
 		g_hash_table_insert (gstate.context_lookup, (gpointer)task->key, task);
 		// The table owns a reference to the task context.
@@ -589,7 +593,7 @@ read_user_mem (vmi_instance_t vmi,
 #if defined(X86_64) || defined(EXPERIMENTAL_READ_USERMEM)
 	// Actually try to pull the contents out of user memory
 
-	// TODO: use a faster technique - ideally calling this while target process is in scope but 
+	// TODO: use a faster technique - ideally calling this while target process is in scope but
 	str = vmi_read_str_va (vmi, va, evt->task->pid);
 	if (NULL == str) {
 		clog_info (CLOG(CLOGGER_ID),"Error: could not read string at %" PRIx64 " in PID %d",
@@ -601,7 +605,7 @@ read_user_mem (vmi_instance_t vmi,
 	goto exit;
 
 #if 0 // below is a graveyard of various stuff that doesn't work on ARM
-	
+
 		// FIXME: fix user mem deref on ARM
 	// TODO: clear out v2p cache prior to translation
 
@@ -706,7 +710,7 @@ failsafe:
 	// An attempt to relay something to the caller
 	snprintf (buf, sizeof(buf), "*0x%" PRIx64, va);
 	str = strdup (buf);
-	
+
 exit:
 	return str;
 }
@@ -1152,6 +1156,13 @@ consume_syscall_event (nvmi_event_t * evt)
 	////
 	clog_info (CLOG(CLOGGER_ID), "%s", buf);
 
+	// If the process context is being replaced, destroy it now to force rebuild.
+	if (0 == strcmp ("sys_execve", cbi->name))
+	{
+		clog_info (CLOG(CLOGGER_ID), "Invalidating context of task pid=%d", evt->task->pid);
+		g_hash_table_remove (gstate.context_lookup, (gpointer) evt->task->key);
+	}
+
 //exit:
 	return rc;
 }
@@ -1213,7 +1224,7 @@ exit:
 	clog_info (CLOG(CLOGGER_ID), "Closing event socket");
 	if (gstate.zmq_event_socket) {
 		zmq_close (gstate.zmq_event_socket);
-	} 
+	}
 	gstate.zmq_event_socket  = NULL;
 
 	return NULL;
@@ -1446,7 +1457,7 @@ main (int argc, char* argv[])
 	bool help = false;
 
 	gstate.use_comms = true;
-	
+
 	while ((opt = getopt(argc, argv, ":o:sv")) != -1) {
 		switch (opt) {
 		case 'o':
