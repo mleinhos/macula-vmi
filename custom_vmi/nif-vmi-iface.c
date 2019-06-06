@@ -58,6 +58,7 @@ static trap_val_t trap = 0xcc; // Intel #DB
 
 static int act_calls = 0;
 static volatile bool interrupted = false;
+static GThread * event_loop_thread = NULL;
 
 static p2m_view_t alt_view1 = ALTP2M_INVALID_VIEW;
 
@@ -77,8 +78,10 @@ typedef struct {
 
 	GHashTable* shadow_pnode_mappings; //key:shadow
 
-	bool loop_running;
+	sem_t start_loop;
+	sem_t loop_complete;
 	bool * ext_nif_busy;
+	int loop_status;
 
 } nif_xen_monitor; // To avoid double pointers
 
@@ -682,15 +685,84 @@ clean:
 }
 
 
+static void *
+nif_event_loop_worker (void * arg)
+{
+	int rc = 0;
+	vmi_event_t main_event, cr3_event;
+
+	*xa.ext_nif_busy = true;
+
+	sem_wait (&xa.start_loop);
+
+	if (interrupted)
+	{
+		goto exit;
+	}
+
+	clog_info (CLOG(CLOGGER_ID), "Starting VMI event loop");
+
+#if defined(ARM64)
+	SETUP_PRIVCALL_EVENT(&main_event, _internal_hook_cb);
+	main_event.data = &xa;
+	if (VMI_SUCCESS != vmi_register_event(xa.vmi, &main_event)) {
+		clog_error (CLOG(CLOGGER_ID), "Unable to register privcall event");
+		goto exit;
+	}
+#else
+	rc = setup_ss_events(xa.vmi);
+	if (rc) {
+		goto exit;
+	}
+
+	SETUP_INTERRUPT_EVENT (&main_event, 0, _internal_hook_cb);
+	main_event.data = &xa;
+	if (VMI_SUCCESS != vmi_register_event (xa.vmi, &main_event)) {
+		clog_error (CLOG(CLOGGER_ID), "Unable to register interrupt event");
+		goto exit;
+	}
+
+	SETUP_REG_EVENT (&cr3_event, CR3, VMI_REGACCESS_W, 0, cr3_cb);
+	if (VMI_SUCCESS != vmi_register_event (xa.vmi, &cr3_event)) {
+		clog_error (CLOG(CLOGGER_ID), "Failed to setup cr3 event");
+		goto exit;
+	}
+#endif
+
+	clog_info (CLOG(CLOGGER_ID), "Entering VMI event loop");
+	vmi_resume_vm (xa.vmi);
+
+	while (!interrupted) {
+		status_t status = vmi_events_listen (xa.vmi, 500);
+		if (status != VMI_SUCCESS) {
+			clog_error (CLOG(CLOGGER_ID), "Some issue in the event_listen loop. Aborting!");
+			interrupted = true;
+			rc = EBUSY;
+		}
+	}
+
+	vmi_pause_vm (xa.vmi);
+
+exit:
+	clog_info (CLOG(CLOGGER_ID), "Exited VMI event loop");
+
+	xa.loop_status = rc;
+	*xa.ext_nif_busy = false;
+	sem_post (&xa.loop_complete);
+
+	return NULL;
+}
+
+
 void
 nif_fini(void)
 {
 	clog_info (CLOG(CLOGGER_ID), "Waiting for Xen event loop to shut down...");
-	while (xa.loop_running) {
-		// Keep yielding until the loop completes
-		usleep (1);
+	if (event_loop_thread)
+	{
+		g_thread_join (event_loop_thread);
+		event_loop_thread = NULL;
 	}
-	assert (!xa.loop_running);
 	clog_info (CLOG(CLOGGER_ID), "Xen event loop has shut down...");
 
 	// The VM was paused when the loop exited
@@ -711,6 +783,9 @@ nif_fini(void)
 	vmi_resume_vm(xa.vmi);
 
 	vmi_destroy(xa.vmi);
+
+	sem_destroy (&xa.start_loop);
+	sem_destroy (&xa.loop_complete);
 }
 
 
@@ -723,7 +798,6 @@ nif_init(const char* name,
 	int rc = 0;
 
 	// Not in event loop yet...
-	xa.loop_running = false;
 	xa.ext_nif_busy = nif_busy;
 
 	*xa.ext_nif_busy = true;
@@ -776,6 +850,20 @@ nif_init(const char* name,
 		goto exit;
 	}
 
+	rc = sem_init (&xa.start_loop, 0, 0);
+	if (rc) {
+		clog_error (CLOG(CLOGGER_ID), "sem_init() failed: %d", rc);
+		goto exit;
+	}
+
+	rc = sem_init (&xa.loop_complete, 0, 0);
+	if (rc) {
+		clog_error (CLOG(CLOGGER_ID), "sem_init() failed: %d", rc);
+		goto exit;
+	}
+
+	event_loop_thread = g_thread_new ("vmi_event_looper", nif_event_loop_worker, NULL);
+
 exit:
 	return rc;
 }
@@ -793,7 +881,11 @@ nif_stop (void)
 {
 	// Called via signal handler; don't block
 	interrupted = true;
-	clog_warn (CLOG(CLOGGER_ID), "Received request to shutdown VMI event loop\n");
+
+	// Kick off event loop in case it hasn't started yet
+	sem_post (&xa.start_loop);
+
+	clog_warn (CLOG(CLOGGER_ID), "Received request to shutdown VMI event loop");
 }
 
 
@@ -801,56 +893,12 @@ int
 nif_event_loop (void)
 {
 	int rc = 0;
-	vmi_event_t main_event, cr3_event;
 
-	*xa.ext_nif_busy = true;
+	// Release the thread to start looping
+	sem_post (&xa.start_loop);
 
-#if defined(ARM64)
-	SETUP_PRIVCALL_EVENT(&main_event, _internal_hook_cb);
-	main_event.data = &xa;
-	if (VMI_SUCCESS != vmi_register_event(xa.vmi, &main_event)) {
-		clog_error (CLOG(CLOGGER_ID), "Unable to register privcall event");
-		goto exit;
-	}
-#else
-	rc = setup_ss_events(xa.vmi);
-	if (rc) {
-		goto exit;
-	}
+	// Wait for exit
 
-	SETUP_INTERRUPT_EVENT (&main_event, 0, _internal_hook_cb);
-	main_event.data = &xa;
-	if (VMI_SUCCESS != vmi_register_event (xa.vmi, &main_event)) {
-		clog_error (CLOG(CLOGGER_ID), "Unable to register interrupt event");
-		goto exit;
-	}
-
-	SETUP_REG_EVENT (&cr3_event, CR3, VMI_REGACCESS_W, 0, cr3_cb);
-	if (VMI_SUCCESS != vmi_register_event (xa.vmi, &cr3_event)) {
-		clog_error (CLOG(CLOGGER_ID), "Failed to setup cr3 event");
-		goto exit;
-	}
-#endif
-
-	clog_info (CLOG(CLOGGER_ID), "Entering VMI event loop");
-	xa.loop_running = true;
-	vmi_resume_vm (xa.vmi);
-
-	while (!interrupted) {
-		status_t status = vmi_events_listen (xa.vmi, 500);
-		if (status != VMI_SUCCESS) {
-			clog_error (CLOG(CLOGGER_ID), "Some issue in the event_listen loop. Aborting!");
-			interrupted = true;
-			rc = EBUSY;
-		}
-	}
-
-	vmi_pause_vm (xa.vmi);
-	xa.loop_running = false;
-	*xa.ext_nif_busy = false;
-
-	clog_info (CLOG(CLOGGER_ID), "Exited VMI event loop");
-
-exit:
-	return rc;
+	sem_wait (&xa.loop_complete);
+	return xa.loop_status;
 }

@@ -93,7 +93,7 @@ typedef struct _nvmi_state {
 
 	// Signal handler
 	struct sigaction act;
-	bool interrupted;
+	volatile bool interrupted;
 	volatile bool nif_busy;
 
 	// VMI info
@@ -179,7 +179,7 @@ exit:
 static void
 close_handler(int sig)
 {
-	clog_info (CLOG(CLOGGER_ID), "Received signal %d, shutting down", sig);
+	clog_info (CLOG(CLOGGER_ID), "Received notification to stop (%d), shutting down", sig);
 	if (!gstate.interrupted) {
 		gstate.interrupted = true;
 		nif_stop();
@@ -1181,6 +1181,7 @@ nvmi_event_consumer (gpointer data)
 	int rc = 0;
 
 	clog_info (CLOG(CLOGGER_ID), "Begining event consumer loop");
+	g_async_queue_ref (gstate.event_queue);
 
 	// Monitor gstate.interrupted
 	while (!gstate.interrupted || gstate.nif_busy) {
@@ -1227,26 +1228,28 @@ exit:
 	}
 	gstate.zmq_event_socket  = NULL;
 
+	g_async_queue_ref (gstate.event_queue);
+
 	return NULL;
 }
 
 static void
 nvmi_main_fini (void)
 {
-	// releasing queue causes event consumer to return
-	if (gstate.event_queue) {
-		g_async_queue_unref (gstate.event_queue);
-		gstate.event_queue = NULL;
-	}
-	clog_info (CLOG(CLOGGER_ID), "Event queue dereferenced");
-
 	if (gstate.consumer_thread) {
 		clog_info (CLOG(CLOGGER_ID), "Giving consumer thread time to leave.");
-		g_thread_join (gstate.consumer_thread);
+		//g_thread_join (gstate.consumer_thread);
 		//usleep(1);
 		clog_info (CLOG(CLOGGER_ID), "Consumer thread joined");
 		gstate.consumer_thread = NULL;
 	}
+
+	// releasing queue causes event consumer to return
+	if (gstate.event_queue) {
+		//g_async_queue_unref (gstate.event_queue);
+		//gstate.event_queue = NULL;
+	}
+	clog_info (CLOG(CLOGGER_ID), "Event queue dereferenced");
 
 	if (gstate.context_lookup) {
 		g_hash_table_destroy (gstate.context_lookup);
@@ -1417,7 +1420,7 @@ comms_init(void)
 
 	rc = zmq_bind (gstate.zmq_event_socket, ZMQ_EVENT_CHANNEL);
 	if (rc) {
-		clog_warn (CLOG(CLOGGER_ID), "zmq_connect(" ZMQ_EVENT_CHANNEL ") failed: %d", rc);
+		clog_warn (CLOG(CLOGGER_ID), "zmq_bind(" ZMQ_EVENT_CHANNEL ") failed: %d", rc);
 		goto exit;
 	}
 

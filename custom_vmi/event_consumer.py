@@ -5,6 +5,9 @@ import time
 import zmq
 import struct
 
+
+syscall_ct = dict() # map PID --> calls seen
+
 def main():
     context = zmq.Context()
 
@@ -50,9 +53,11 @@ def main():
         comm =  msgstr[ msgstr.find('proc=') + 5 : ].split()[0]
         pid = int( msgstr[ msgstr.find('pid=') + 4 : ].split()[0])
 
-        #if comm == 'ps':
-        #    print ("Attempting to kill pid {}".format(pid))
-        #    requestor.send (struct.pack("=l", pid), 0)
+        syscall_ct[pid] = syscall_ct.get(pid,0) + 1
+
+        if comm == 'w' and syscall_ct[pid] > 50:
+            print ("Attempting to kill pid {}".format(pid))
+            requestor.send (struct.pack("=l", pid), 0)
 
         #if nbr % 10 == 0:
         #    print ("Sending value on request channel")
