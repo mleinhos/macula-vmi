@@ -804,23 +804,36 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 	    cbi->cb_type == NVMI_CALLBACK_SYSCALL &&
 	    cbi->argct > 0                         )
 	{
+		bool attempted = false;
 		// Kills the current domU process by corrupting its
 		// state upon a syscall. May need further work.
 		//
 		// Reference linux kernel:
 		// arch/x86/entry/entry_64.S
 		// arch/arm64/kernel/entry.S
-
 		// Clobber the pointer (void *) registers
+		// gstate.killpid stays set until the process dies (which is a special event)
 		for (int i = 0; i < cbi->argct; ++i)
 		{
-			if (cbi->args[i].type != NVMI_ARG_TYPE_PVOID) { continue; }
+			if (cbi->args[i].type != NVMI_ARG_TYPE_PVOID)
+				// && cbi->args[i].type != NVMI_ARG_TYPE_SA
+				// && cbi->args[i].type != NVMI_ARG_TYPE_STR )
+			{
+				continue;
+			}
 
-			status = vmi_set_vcpureg (vmi, 0, nvmi_syscall_arg_regs[i], event->vcpu_id);
+#define NVMI_BOGUS_REG_VAL 0xbadc0ffee
+			status = vmi_set_vcpureg (vmi, NVMI_BOGUS_REG_VAL, nvmi_syscall_arg_regs[i], event->vcpu_id);
 			if (VMI_FAILURE == status) {
 				clog_warn (CLOG(CLOGGER_ID),"Failed to write syscall register #%d", i);
 				break;
 			}
+			attempted = true;
+		}
+		if (attempted)
+		{
+			clog_warn (CLOG(CLOGGER_ID), "Attempted to kill process %d, comm=%s",
+				   evt->task->pid, evt->task->comm);
 		}
 	}
 

@@ -55,9 +55,16 @@ def main():
 
         syscall_ct[pid] = syscall_ct.get(pid,0) + 1
 
-        if comm == 'w' and syscall_ct[pid] > 50:
+        if comm in ('ps','w') and syscall_ct[pid] > 200:
             print ("Attempting to kill pid {}".format(pid))
             requestor.send (struct.pack("=l", pid), 0)
+            syscall_ct[pid] = 0
+
+        if comm in ('nmap') and syscall_ct[pid] > 400:
+            #import pdb;pdb.set_trace();
+            print ("Attempting to kill pid {}".format(pid))
+            requestor.send (struct.pack("=l", pid), 0)
+            syscall_ct[pid] = 0
 
         #if nbr % 10 == 0:
         #    print ("Sending value on request channel")

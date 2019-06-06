@@ -689,7 +689,8 @@ static void *
 nif_event_loop_worker (void * arg)
 {
 	int rc = 0;
-	vmi_event_t main_event, cr3_event;
+	vmi_event_t main_event;
+	//vmi_event_t cr3_event;
 
 	*xa.ext_nif_busy = true;
 
@@ -722,11 +723,17 @@ nif_event_loop_worker (void * arg)
 		goto exit;
 	}
 
+#if 0
+	// Not necessary: If we don't trust the user address space
+	// cache on a callback, we should invalidate it in the
+	// callback and not add another callback!
 	SETUP_REG_EVENT (&cr3_event, CR3, VMI_REGACCESS_W, 0, cr3_cb);
 	if (VMI_SUCCESS != vmi_register_event (xa.vmi, &cr3_event)) {
 		clog_error (CLOG(CLOGGER_ID), "Failed to setup cr3 event");
 		goto exit;
 	}
+#endif
+
 #endif
 
 	clog_info (CLOG(CLOGGER_ID), "Entering VMI event loop");

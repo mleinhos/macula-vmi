@@ -117,14 +117,30 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
 	  .name = "sys_read", .argct = 3, false, true, NULL,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
-		    { .type = NVMI_ARG_TYPE_SCALAR  },
+		    { .type = NVMI_ARG_TYPE_PVOID  },
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
+
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_setsockopt", .argct = 5, false, true, NULL,
+	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
+		    { .type = NVMI_ARG_TYPE_SCALAR },
+		    { .type = NVMI_ARG_TYPE_SCALAR },
+		    { .type = NVMI_ARG_TYPE_PVOID  },
+		    { .type = NVMI_ARG_TYPE_SCALAR } } },
+
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_getsockopt", .argct = 5, false, true, NULL,
+	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
+		    { .type = NVMI_ARG_TYPE_SCALAR },
+		    { .type = NVMI_ARG_TYPE_SCALAR },
+		    { .type = NVMI_ARG_TYPE_PVOID  },
+		    { .type = NVMI_ARG_TYPE_PVOID  } } },
 
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
 	  .name = "sys_write", .argct = 3, false, true, NULL,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
-		    { .type = NVMI_ARG_TYPE_SCALAR },
+		    { .type = NVMI_ARG_TYPE_PVOID },
 		    { .type = NVMI_ARG_TYPE_SCALAR} } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
@@ -206,8 +222,19 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 		    { .type = NVMI_ARG_TYPE_PVOID  },
 		    { .type = NVMI_ARG_TYPE_PVOID  } } },
 
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_sigprocmask", .argct = 3, false, true, NULL,
+	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
+		    { .type = NVMI_ARG_TYPE_PVOID  },
+		    { .type = NVMI_ARG_TYPE_PVOID  } } },
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_rt_sigprocmask", .argct = 3, false, true, NULL,
+	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
+		    { .type = NVMI_ARG_TYPE_PVOID  },
+		    { .type = NVMI_ARG_TYPE_PVOID  } } },
 
-	// !!!!!!!!!! INCOMPLETE/INCORRECT DEFS 
+
+	// !!!!!!!!!! INCOMPLETE/INCORRECT DEFS
 	// While incorrect, keep argct == 0
 	// !!!!!!!!!!!!!!!!!!!!!!!!!!
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
