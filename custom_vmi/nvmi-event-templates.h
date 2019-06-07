@@ -120,6 +120,19 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 		    { .type = NVMI_ARG_TYPE_PVOID  },
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
+	// Network stuff
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_bind", .argct = 3, true, true, NULL,
+	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
+		    { .type = NVMI_ARG_TYPE_SA     } ,
+		    { .type = NVMI_ARG_TYPE_SCALAR } } },
+
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_connect", .argct = 3, true, true, NULL,
+	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
+		    { .type = NVMI_ARG_TYPE_SA     } ,
+		    { .type = NVMI_ARG_TYPE_SCALAR } } },
+
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
 	  .name = "sys_setsockopt", .argct = 5, false, true, NULL,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
@@ -136,6 +149,31 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 		    { .type = NVMI_ARG_TYPE_PVOID  },
 		    { .type = NVMI_ARG_TYPE_PVOID  } } },
 
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_send", .argct = 5, false, true, NULL,
+	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
+		    { .type = NVMI_ARG_TYPE_PVOID  },
+		    { .type = NVMI_ARG_TYPE_SCALAR },
+		    { .type = NVMI_ARG_TYPE_PVOID  } } },
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_sendmsg", .argct = 6, false, true, NULL,
+	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
+		    { .type = NVMI_ARG_TYPE_PVOID  },
+		    { .type = NVMI_ARG_TYPE_SCALAR  } } },
+
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_recv", .argct = 5, false, true, NULL,
+	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
+		    { .type = NVMI_ARG_TYPE_PVOID  },
+		    { .type = NVMI_ARG_TYPE_SCALAR },
+		    { .type = NVMI_ARG_TYPE_PVOID  } } },
+
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_recvmsg", .argct = 6, false, true, NULL,
+	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
+		    { .type = NVMI_ARG_TYPE_PVOID  },
+		    { .type = NVMI_ARG_TYPE_SCALAR  } } },
+	
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
 	  .name = "sys_write", .argct = 3, false, true, NULL,
@@ -147,17 +185,6 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 	  .name = "sys_close", .argct = 1, false, true, NULL,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR }} },
 
-	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_bind", .argct = 3, true, true, NULL,
-	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
-		    { .type = NVMI_ARG_TYPE_SA     } ,
-		    { .type = NVMI_ARG_TYPE_SCALAR } } },
-
-	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_connect", .argct = 3, true, true, NULL,
-	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
-		    { .type = NVMI_ARG_TYPE_SA     } ,
-		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
 	  .name = "sys_gettimeofday", .argct = 2, false, false, NULL,  // verbose

@@ -212,7 +212,7 @@ cb_gather_registers (vmi_instance_t vmi,
 	// Get the rest of the context too, for context lookup. Beware KPTI!!
 #if defined(ARM64)
 	regs->arm.r = *(event->arm_regs);
-	status  = vmi_get_vcpureg (vmi, &regs->arm.sp, SP_USR, event->vcpu_id);
+	status  = vmi_get_vcpureg (vmi, &regs->arm.sp,     SP_USR, event->vcpu_id);
 	status |= vmi_get_vcpureg (vmi, &regs->arm.sp_el0, SP_EL0, event->vcpu_id);
 #else
 	regs->x86.r = *(event->x86_regs);
