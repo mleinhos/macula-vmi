@@ -736,7 +736,7 @@ nif_event_loop_worker (void * arg)
 
 #endif
 
-	clog_info (CLOG(CLOGGER_ID), "Entering VMI event loop");
+	clog_info (CLOG(CLOGGER_ID), "Entering VMI event loop: resuming VM");
 	vmi_resume_vm (xa.vmi);
 
 	while (!interrupted) {
@@ -787,6 +787,7 @@ nif_fini(void)
 
 	fini_xen_monitor();
 
+	clog_info (CLOG(CLOGGER_ID), "Resuming VM");
 	vmi_resume_vm(xa.vmi);
 
 	vmi_destroy(xa.vmi);
