@@ -1,4 +1,3 @@
-
 _arch = $(shell uname -m)
 
 CC = gcc
@@ -8,7 +7,7 @@ CFLAGS = -I../common -I.
 #CFLAGS += -O3 -g
 CFLAGS += -O0 -ggdb
 
-TARGET = NInspector 
+TARGET = NInspector
 
 ifeq ($(_arch), aarch64)
 # ARM64 definitions
@@ -27,7 +26,7 @@ LIBS = -lvmi -lxenctrl -lxenlight $(shell pkg-config --libs glib-2.0) -lzmq -lpt
 
 endif
 
-DEPS = nvmi.h
+DEPS = nif-vmi-iface.h nvmi-common.h nvmi-event-templates.h nvmi-internal-defs.h
 OBJS = nvmi-main.o nif-vmi-iface.o process_kill_helper.o
 
 .PHONY: clean
@@ -35,9 +34,6 @@ OBJS = nvmi-main.o nif-vmi-iface.o process_kill_helper.o
 all: $(TARGET)
 
 $(TARGET): $(OBJS)
-	$(CC) -o $@ $^ $(CFLAGS) $(LIBS)
-
-NInspector-orig: nvmi.o process_kill_helper.o
 	$(CC) -o $@ $^ $(CFLAGS) $(LIBS)
 
 %.o: %.c $(DEPS)

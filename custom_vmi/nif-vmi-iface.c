@@ -5,7 +5,7 @@
  *
  * Company: Numen Inc.
  *
- * Developerd: Ali Islam
+ * Developers: Ali Islam
  *             Matt Leinhos
  */
 
@@ -93,6 +93,22 @@ typedef struct nif_page_node {
 } nif_page_node;
 
 // Track one hook (instrumentation point)
+//
+// TODO: A hook on ARM has two parts: (1) The entry, and (2) The exit,
+// which are split across two actual hooks (SMCs) in the guest
+// memory. Once (1) has executed, it is imperative that (2) executes
+// as well before (a) a context switch or (b) the hook is
+// disabled. The code has to guard against those two possibilities.
+//
+// To guard against (a), an additional instrumentation point at
+// schedule() or __schedule() should be set in the same view as the
+// second SMC. It may also be possible to address (a) via a per-VCPU
+// lock. For (b), each hook should be guarded by a lock (ideally a RW
+// lock or spinlock) such that the lock is acquired upon the entry of
+// (1) and released upon the exit of (2); that lock must be acquired
+// (write lock if RW lock is used) before the hook can be
+// disabled. Note that glib supports a RW lock, and pthread has a
+// spinlock implementation.
 typedef struct nif_hook_node {
 	addr_t			offset;
 	char 			name[SYSCALL_MAX_NAME_LEN];
@@ -507,7 +523,7 @@ nif_enable_monitor (addr_t kva,
 
 	// Create new hook node and save it
 	hook_node = g_new0(nif_hook_node, 1);
-	strncpy (hook_node->name, name, MAX_SNAME_LEN);
+	strncpy (hook_node->name, name, SYSCALL_MAX_NAME_LEN);
 	hook_node->parent     = pgnode;
 	hook_node->offset     = offset;
 	hook_node->pre_cb     = pre_cb;
