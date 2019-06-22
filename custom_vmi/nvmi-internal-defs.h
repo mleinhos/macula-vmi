@@ -66,8 +66,12 @@ typedef struct _nvmi_task_info
 	unsigned long refct;
 
 	// TODO: get full path to binary via task->mm->??, since it's a file-backed mmap()
-	
+
+	// If not 0, this is the request ID that asked for the death of this process
+	uint64_t   pending_kill_request_id;
+	unsigned long kill_attempts;
 } nvmi_task_info_t;
+
 
 // TODO: exapnd for other event types
 typedef struct _nvmi_event

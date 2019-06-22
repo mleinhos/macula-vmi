@@ -33,6 +33,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
+#include <endian.h>
 
 #include <zmq.h>
 
@@ -81,13 +82,12 @@ nvmi_special_cbs[] =
 
 //
 // Remaining TODO:
-//
 // - manage lifetime of process context
 // - offload as much work as possible to consumer thread or to a post callback (notification of second VMI event)
 //
 
 typedef struct _nvmi_state {
-	vmi_pid_t killpid;
+//	vmi_pid_t killpid;
 
 	int act_calls;
 
@@ -105,18 +105,16 @@ typedef struct _nvmi_state {
 
 	addr_t va_current_task;
 
-	// Special-case breakpoints
-	addr_t va_exit_mm;
-
 	bool use_comms;
 	void* zmq_context;
 	void* zmq_event_socket;
 	void* zmq_request_socket;
 
-	// Maps easy value to process context, e.g. curent
+	// Maps easy-to-derive value to process context, e.g. curent
 	// task_struct, or base kernel stack pointer.
 	GHashTable * context_lookup;
-
+	GRWLock context_lock;
+	
 	GThread * consumer_thread;
 	GAsyncQueue * event_queue;
 
@@ -295,7 +293,6 @@ cb_current_pid  (vmi_instance_t vmi,
 		 vmi_pid_t * pid)
 {
 	int rc = 0;
-//	addr_t curr = 0;
 	status_t status = VMI_SUCCESS;
 	addr_t local_curr = 0;
 	vmi_pid_t local_pid = 0;
@@ -314,7 +311,9 @@ cb_current_pid  (vmi_instance_t vmi,
 				  &local_curr);
 	if (VMI_SUCCESS != status) {
 		rc = EIO;
-		clog_warn (CLOG(CLOGGER_ID), "Failed to determine current task (from gs_base + curr_task_offset)");
+		clog_warn (CLOG(CLOGGER_ID),
+			   "Failed to determine current task (from gs_base=%p + curr_task_offset=%p)",
+			   regs->x86.r.gs_base + gstate.va_current_task);
 		goto exit;
 	}
 #endif
@@ -391,7 +390,6 @@ static int
 cb_build_task_context (vmi_instance_t vmi,
 		       nvmi_registers_t * regs,
 		       addr_t curr_task,
-//		       vmi_pid_t pid,
 		       nvmi_task_info_t ** tinfo)
 {
 	int rc = 0;
@@ -512,14 +510,12 @@ cb_gather_context (vmi_instance_t vmi,
 	nvmi_event_t * evt = (nvmi_event_t *) g_slice_new0 (nvmi_event_t);
 	int argct = (NULL == cbi ? 0 : cbi->argct);
 	addr_t curr = 0;
-//	vmi_pid_t pid = 0;
 
 	rc = cb_gather_registers (vmi, vmievent, &evt->r, argct);
 	if (rc) {
 		goto exit;
 	}
 
-//	rc = cb_current_pid (vmi, vmievent, &evt->r, &curr, &pid);
 	rc = cb_current_task (vmi, vmievent, &evt->r, &curr);
 	if (rc) {
 		clog_warn (CLOG(CLOGGER_ID), "Context could not be found");
@@ -529,16 +525,13 @@ cb_gather_context (vmi_instance_t vmi,
 	// Look for key in known contexts. If it isn't there, allocate
 	// new nvmi_task_info_t and populate it.
 	// TODO: enable caching by figuring out why it's broken on ARM (current != our key)
+
+	g_rw_lock_reader_lock (&gstate.context_lock);
 	task = g_hash_table_lookup (gstate.context_lookup, (gpointer)curr);
-	//task = g_hash_table_lookup (gstate.context_lookup, (gpointer)(unsigned long)pid);
-
-//	if (task && task->pid != pid) asm("int $3");
-
-//	clog_info (CLOG(CLOGGER_ID), "pid %d --> task %p", pid, task);
+	g_rw_lock_reader_unlock (&gstate.context_lock);
 
 	if (NULL == task) {
-		// build new context
-		//rc = cb_build_task_context (vmi, &evt->r, curr, pid, &task);
+		// Build new context
 		rc = cb_build_task_context (vmi, &evt->r, curr, &task);
 		if (rc) {
 			if (0 == task->pid) {
@@ -552,10 +545,11 @@ cb_gather_context (vmi_instance_t vmi,
 		// The system owns a reference. When the task dies, we remove it.
 		atomic_inc (&task->refct);
 
-//		task->key = pid;
 		task->key = curr;
-//		task->task_struct = task;
+
+		g_rw_lock_writer_lock (&gstate.context_lock);
 		g_hash_table_insert (gstate.context_lookup, (gpointer)task->key, task);
+		g_rw_lock_writer_unlock (&gstate.context_lock);
 		// The table owns a reference to the task context.
 //		atomic_inc (&task->refct);
 	}
@@ -566,6 +560,38 @@ cb_gather_context (vmi_instance_t vmi,
 	*event = evt;
 
 exit:
+	return rc;
+}
+
+
+static int
+find_task_context_by_pid (vmi_pid_t pid,
+			  nvmi_task_info_t ** task)
+{
+	int rc = ENOENT;
+	GList * tasks = NULL;
+	GList * elem = NULL;
+
+	// TODO: we're iterating over the contexts without a lock. Is this OK?
+	g_rw_lock_reader_lock (&gstate.context_lock);
+	
+	tasks = g_hash_table_get_values (gstate.context_lookup);
+
+	for (elem = tasks; elem != NULL; elem = elem->next)
+	{
+		nvmi_task_info_t * i = (nvmi_task_info_t *) elem->data;
+		if (i->pid == pid)
+		{
+			*task = i;
+			rc = 0;
+			break;
+		}
+	}
+
+	g_rw_lock_reader_unlock (&gstate.context_lock);
+
+exit:
+	g_list_free (tasks);
 	return rc;
 }
 
@@ -800,11 +826,10 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 		}
 	}
 
-	if (evt->task->pid == gstate.killpid &&
-	    cbi->cb_type == NVMI_CALLBACK_SYSCALL &&
-	    cbi->argct > 0                         )
+	if (evt->task->pending_kill_request_id && cbi->argct > 0)
 	{
 		bool attempted = false;
+
 		// Kills the current domU process by corrupting its
 		// state upon a syscall. May need further work.
 		//
@@ -815,9 +840,15 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 		// gstate.killpid stays set until the process dies (which is a special event)
 		for (int i = 0; i < cbi->argct; ++i)
 		{
-			if (cbi->args[i].type != NVMI_ARG_TYPE_PVOID)
-				// && cbi->args[i].type != NVMI_ARG_TYPE_SA
-				// && cbi->args[i].type != NVMI_ARG_TYPE_STR )
+			if (cbi->args[i].type != NVMI_ARG_TYPE_PVOID
+			    && cbi->args[i].type != NVMI_ARG_TYPE_SA
+			    && cbi->args[i].type != NVMI_ARG_TYPE_STR)
+			{
+				continue;
+			}
+
+			// It is feasible to kill the process. Do it intermittenly to avoid a loop.
+			if (++evt->task->kill_attempts % 10 != 0)
 			{
 				continue;
 			}
@@ -825,15 +856,16 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 #define NVMI_BOGUS_REG_VAL 0xbadc0ffee
 			status = vmi_set_vcpureg (vmi, NVMI_BOGUS_REG_VAL, nvmi_syscall_arg_regs[i], event->vcpu_id);
 			if (VMI_FAILURE == status) {
-				clog_warn (CLOG(CLOGGER_ID),"Failed to write syscall register #%d", i);
+				clog_warn (CLOG(CLOGGER_ID), "Failed to write syscall register #%d", i);
 				break;
 			}
 			attempted = true;
 		}
 		if (attempted)
 		{
-			clog_warn (CLOG(CLOGGER_ID), "Attempted to kill process %d, comm=%s",
-				   evt->task->pid, evt->task->comm);
+			++evt->task->kill_attempts;
+			clog_warn (CLOG(CLOGGER_ID), "Attempted to kill process %d, comm=%s %d times",
+				   evt->task->pid, evt->task->comm, evt->task->kill_attempts);
 		}
 	}
 
@@ -1065,18 +1097,34 @@ consume_special_event (nvmi_event_t * evt)
 	clog_info (CLOG(CLOGGER_ID), "special event %s occurred in pid=%d comm=%s",
 		   cbi->name, evt->task->pid, evt->task->comm);
 
-	if (cbi == &nvmi_special_cbs[NVMI_DO_EXIT_IDX]) {
+	if (cbi == &nvmi_special_cbs[NVMI_DO_EXIT_IDX])
+	{
 		// handle process destruction
 		clog_info (CLOG(CLOGGER_ID), "exit of process pid %ld proc %s",
 			 evt->task->pid, evt->task->comm);
 
-		if (evt->task->pid == gstate.killpid) {
-			clog_info (CLOG(CLOGGER_ID), "Kill of process pid=%d succeeded", gstate.killpid);
-			gstate.killpid = KILL_PID_NONE;
+		// Did brain ask for this destruction?
+		if (evt->task->pending_kill_request_id) {
+			response_t res = {0};
+			res.id = htobe64 (evt->task->pending_kill_request_id);
+			res.status = htobe32 (0);
+
+			clog_info (CLOG(CLOGGER_ID), "Kill of process pid=%d succeeded", evt->task->pid);
+
+			rc = zmq_send (gstate.zmq_request_socket, &res, sizeof(res), 0);
+			if (rc < 0) {
+				rc = errno;
+				clog_warn (CLOG(CLOGGER_ID), "zmq_send() failed: %d", rc);
+			}
+			//		if (evt->task->pid == gstate.killpid) {
+			//			clog_info (CLOG(CLOGGER_ID), "Kill of process pid=%d succeeded", evt->task->pid);
+			//			gstate.killpid = KILL_PID_NONE;
 		}
 
 		// we'll never see that task again....
+		g_rw_lock_writer_lock (&gstate.context_lock);
 		g_hash_table_remove (gstate.context_lookup, (gpointer) evt->task->key);
+		g_rw_lock_writer_unlock (&gstate.context_lock);
 	}
 
 	return rc;
@@ -1090,25 +1138,51 @@ consume_syscall_event (nvmi_event_t * evt)
 	nvmi_cb_info_t * cbi = evt->cbi;
 	char buf[1024] = {0};
 	char buf2[512];
+	event_t event = {0};
+	struct timeval ts;
 
 	assert (cbi);
 	assert (cbi->cb_type == NVMI_CALLBACK_SYSCALL);
 
 	snprintf (buf, sizeof(buf), "syscall=%s(", cbi->name);
 
+	// General event data
+	event.len     = htobe32 (sizeof(event));
+	event.type    = htobe32 (EVENT_TYPE_SYSCALL);
+	event.context = htobe64 (evt->task->pid);
+
+	(void) gettimeofday (&ts, NULL);
+	event.time.sec  = htobe64 (ts.tv_sec);
+	event.time.usec = htobe64 (ts.tv_usec);
+	strncpy (event.comm, evt->task->comm, sizeof(event.comm));
+
+	// Syscall-specific data
+	strncpy (event.u.syscall.name, cbi->name, sizeof(event.u.syscall.name));
+	event.u.syscall.arg_ct = htobe32 (cbi->argct);
+
 	for (int i = 0; i < cbi->argct; ++i) {
 		reg_t val = evt->r.syscall_args[i];
 
 		switch (cbi->args[i].type) {
 		case NVMI_ARG_TYPE_STR: { // char *
+			size_t len = 0;
 			const char * str = (const char *) &(evt->mem[ evt->mem_ofs[i]]);
-			if (strlen(str) > 0) {
+			len = strlen(str);
+
+			event.u.syscall.args[i].type = htobe32 (SYSCALL_ARG_TYPE_STR);
+			event.u.syscall.args[i].len  = htobe32 (MIN (len+1, sizeof(event.u.syscall.data)));
+			event.u.syscall.args[i].val.offset = htobe32 (0);
+			if (len > 0) {
 				snprintf (buf2, sizeof(buf2) - 1, " \"%s\",", str);
 				strncat (buf, buf2, sizeof(buf) - strlen(buf) - 1);
+				strncpy (&event.u.syscall.data[0], str, sizeof(event.u.syscall.data)-1);
+				if (len >= sizeof(event.u.syscall.data)) {
+					event.u.syscall.flags |= SYSCALL_EVENT_FLAG_BUFFER_TRUNCATED;
+				}
+				event.u.syscall.flags |= SYSCALL_EVENT_FLAG_HAS_BUFFER;
 			}
 			break;
 		}
-
 
 #if 0
 		case NVMI_ARG_TYPE_SA: {
@@ -1139,13 +1213,35 @@ consume_syscall_event (nvmi_event_t * evt)
 		}
 
 #endif
+		case NVMI_ARG_TYPE_SA: // FIXME: for now, don't deref SA
+			event.u.syscall.args[i].type = htobe32 (SYSCALL_ARG_TYPE_SOCKADDR);
+			event.u.syscall.args[i].len  = htobe32 (0);
+			event.u.syscall.args[i].val.long_val = htobe64 (val);
+			break;
+
 		case NVMI_ARG_TYPE_SCALAR:
+			event.u.syscall.args[i].type = htobe32 (SYSCALL_ARG_TYPE_SCALAR);
+			event.u.syscall.args[i].val.long_val = htobe64 (val);
+
+			snprintf (buf2, sizeof(buf2), " %lx,", val);
+			strncat (buf, buf2, sizeof(buf) - strlen(buf) - 1);
+			break;
+
 		case NVMI_ARG_TYPE_PVOID:
-		case NVMI_ARG_TYPE_SA: // for now, don't deref SA
+			event.u.syscall.args[i].type = htobe32 (SYSCALL_ARG_TYPE_PVOID);
+			event.u.syscall.args[i].val.long_val = htobe64 (val);
+
+			snprintf (buf2, sizeof(buf2), " %lx,", val);
+			strncat (buf, buf2, sizeof(buf) - strlen(buf) - 1);
+			break;
+
 		default:
 			//clog_info (CLOG(CLOGGER_ID), "\targ %d: %lx", i+1, val);
 			snprintf (buf2, sizeof(buf2), " %lx,", val);
 			strncat (buf, buf2, sizeof(buf) - strlen(buf) - 1);
+
+			event.u.syscall.args[i].len  = htobe32 (0);
+
 			break;
 		} // switch
 	} // for
@@ -1160,20 +1256,26 @@ consume_syscall_event (nvmi_event_t * evt)
 	strncat (buf, buf2, sizeof(buf) - strlen(buf) - 1);
 
 	if (gstate.use_comms) {
-		rc = zmq_send (gstate.zmq_event_socket, buf, strlen(buf)+1, 0);
+		//rc = nvmi_send_event (evt);
+		//if (rc) {
+		//clog_warn (CLOG(CLOGGER_ID), "Failed to send event!: %d", rc);
+		//}
+		//rc = zmq_send (gstate.zmq_event_socket, buf, strlen(buf)+1, 0);
+		rc = zmq_send (gstate.zmq_event_socket, &event, sizeof(event), 0);
 		if (rc < 0) {
 			clog_warn (CLOG(CLOGGER_ID),"zmq_send() failed: %d", rc);
 		}
 	}
 
-	////
 	clog_info (CLOG(CLOGGER_ID), "%s", buf);
 
 	// If the process context is being replaced, destroy it now to force rebuild.
 	if (0 == strcmp ("sys_execve", cbi->name))
 	{
 		clog_info (CLOG(CLOGGER_ID), "Invalidating context of task pid=%d", evt->task->pid);
+		g_rw_lock_writer_lock (&gstate.context_lock);
 		g_hash_table_remove (gstate.context_lookup, (gpointer) evt->task->key);
+		g_rw_lock_writer_unlock (&gstate.context_lock);
 	}
 
 //exit:
@@ -1265,8 +1367,12 @@ nvmi_main_fini (void)
 	clog_info (CLOG(CLOGGER_ID), "Event queue dereferenced");
 
 	if (gstate.context_lookup) {
+		g_rw_lock_writer_lock (&gstate.context_lock);
+
 		g_hash_table_destroy (gstate.context_lookup);
 		gstate.context_lookup = NULL;
+
+		g_rw_lock_writer_unlock (&gstate.context_lock);
 		clog_info (CLOG(CLOGGER_ID), "Context lookup table destroyed");
 	}
 
@@ -1294,12 +1400,13 @@ nvmi_main_init (void)
 		goto exit;
 	}
 
-	gstate.killpid = KILL_PID_NONE;
+	g_rw_lock_init (&gstate.context_lock);
+
 	gstate.context_lookup = g_hash_table_new_full (NULL, // hash
 						       NULL, // key equal
 						       NULL, // key destroy
 						       NULL); //deref_task_context); // TODO: impl ctx refct
-
+	
 	status |= vmi_get_kernel_struct_offset (vmi, "task_struct", "comm", &gstate.task_name_ofs);
 	status |= vmi_get_kernel_struct_offset (vmi, "task_struct", "pid",  &gstate.task_pid_ofs);
 	status |= vmi_get_kernel_struct_offset (vmi, "task_struct", "mm",   &gstate.task_mm_ofs);
@@ -1336,43 +1443,91 @@ exit:
 	return rc;
 }
 
+
 static gpointer
 comms_request_servicer (gpointer data)
 {
-    int rc = 0;
+	int rc = 0;
 
-    while (!gstate.interrupted) {
-        char msg[30] = {0};
-        vmi_pid_t pid = -1;
+	while (!gstate.interrupted)
+	{
+		request_t req = {0};
+		response_t res = {0};
+		bool response_created = false;
+		nvmi_task_info_t * task = NULL;
 
-	rc = zmq_recv (gstate.zmq_request_socket, msg, sizeof(msg), 0);
-        if (rc <= 0) {
-		clog_info (CLOG(CLOGGER_ID), "Request servicer thread bailing out");
-		break;
-        }
+		rc = zmq_recv (gstate.zmq_request_socket, &req, sizeof(req), ZMQ_DONTWAIT);
+		if (rc <= 0)
+		{
+			if (EAGAIN == errno)
+			{
+				usleep(500);
+				continue;
+			}
+			// Otherwise, fatal...
+			clog_info (CLOG(CLOGGER_ID), "Request servicer thread bailing out");
+			break;
+		}
 
-        //
-        // Set global killpid: now syscall hook will watch for this pid
-        //
+		// Change fields in-place
+		req.id   = be64toh (req.id);
+		req.cmd  = be32toh (req.cmd);
+		req.arg1 = be64toh (req.arg1);
+		req.arg2 = be64toh (req.arg2);
 
-        pid = *(vmi_pid_t*) msg;
-        clog_warn (CLOG(CLOGGER_ID), "Received request to kill PID %d", pid);
-        gstate.killpid = pid;
-    }
+		switch (req.cmd)
+		{
+		case REQUEST_CMD_PROCKILL:
+			clog_warn (CLOG(CLOGGER_ID), "Received request %lx to kill PID %d", req.id, req.arg1);
+
+			// Set global killpid: now syscall hook will watch for this pid
+			rc = find_task_context_by_pid (req.arg1, &task);
+			if (rc) {
+				res.id = htobe64 (req.id);
+				res.status = htobe32 (rc);
+				response_created = true;
+				clog_warn (CLOG(CLOGGER_ID), "Request %lx indicated invalid PID %d: %d",
+					   req.id, req.arg1, rc);
+				break;
+			}
+
+			task->pending_kill_request_id = req.id;
+			break;
+
+		case REQUEST_CMD_SET_EVENT_LIMIT:
+			clog_warn (CLOG(CLOGGER_ID), "Received request %lx to set event limit to %d", req.arg1);
+			res.id = htobe64 (req.id);
+			res.status = htobe32 (0);
+			response_created = true;
+			break;
+
+		default:
+			break;
+		}
+
+		if (response_created)
+		{
+			rc = zmq_send (gstate.zmq_request_socket, &res, sizeof(res), 0);
+			if (rc < 0) {
+				rc = errno;
+				clog_warn (CLOG(CLOGGER_ID), "zmq_send() failed: %d", rc);
+			}
+		}
+	} // while
 
 exit:
-    clog_info (CLOG(CLOGGER_ID), "Request servicer thread returning");
+	clog_info (CLOG(CLOGGER_ID), "Request servicer thread returning");
 
-    // Request socket
-    clog_info (CLOG(CLOGGER_ID), "Closing request socket");
-    if (gstate.zmq_request_socket) {
-	    zmq_close (gstate.zmq_request_socket);
-    }
-    gstate.zmq_request_socket  = NULL;
+	// Request socket
+	clog_info (CLOG(CLOGGER_ID), "Closing request socket");
+	if (gstate.zmq_request_socket) {
+		zmq_close (gstate.zmq_request_socket);
+	}
+	gstate.zmq_request_socket  = NULL;
 
-    //g_thread_exit (NULL);
-    return NULL;
+	return NULL;
 }
+
 
 static void
 comms_fini(void)
@@ -1546,3 +1701,10 @@ exit:
 	logger_fini();
 	return rc;
 }
+
+/*
+ * Local variables:
+ * mode: C
+ * c-file-style: "linux"
+ * End:
+ */

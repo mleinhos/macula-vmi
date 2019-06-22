@@ -576,11 +576,11 @@ setup_ss_events (vmi_instance_t vmi)
 	}
 
 	for (int i = 0; i < vcpus; i++) {
-		SETUP_SINGLESTEP_EVENT(&ss_event[i], 1u << i, singlestep_cb,0);
+		SETUP_SINGLESTEP_EVENT (&ss_event[i], 1u << i, singlestep_cb, 0);
 
 		if (VMI_SUCCESS != vmi_register_event(vmi, &ss_event[i])) {
 			rc = EIO;
-			clog_error (CLOG(CLOGGER_ID), "Failed to register SS event on VCPU failed %d", i);
+			clog_error (CLOG(CLOGGER_ID), "Failed to register SS event on VCPU %d: %d", i, rc);
 			goto exit;
 		}
 	}
@@ -732,7 +732,12 @@ nif_event_loop_worker (void * arg)
 		goto exit;
 	}
 
+#if VMI_EVENTS_VERSION >= 0x6
+	SETUP_INTERRUPT_EVENT (&main_event, _internal_hook_cb);
+#else
 	SETUP_INTERRUPT_EVENT (&main_event, 0, _internal_hook_cb);
+#endif
+
 	main_event.data = &xa;
 	if (VMI_SUCCESS != vmi_register_event (xa.vmi, &main_event)) {
 		clog_error (CLOG(CLOGGER_ID), "Unable to register interrupt event");

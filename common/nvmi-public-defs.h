@@ -22,13 +22,15 @@
 
 #define SYSCALL_MAX_NAME_LEN 32
 #define SYSCALL_MAX_ARGS 6
+#define SYSCALL_MAX_ARG_BUF 1024
+
 #define SOCKADDR_MAX_LEN 64 // TODO: get sizeof(struct sockaddr_in6)
 
 #define NVMI_STRUCT_ATTRIBS __attribute__((packed))
 
 
-typedef uint16_t length_t;
-typedef uint16_t offset_t;
+typedef uint32_t length_t;
+typedef uint32_t offset_t;
 
 // These indicate there's no data to point to
 #define INVALID_LENGTH ((length_t)-3);
@@ -42,26 +44,26 @@ typedef uint64_t process_ident_t;
 
 // Timestamp: is this adequate?
 typedef struct _timeval {
-    uint64_t sec;
-    uint64_t usec;
+	uint64_t sec;
+	uint64_t usec;
 } NVMI_STRUCT_ATTRIBS  timeval_t;
 
 
 typedef struct _sock_addr {
-    uint16_t family;
-    uint8_t  data[SOCKADDR_MAX_LEN];
+	uint16_t family;
+	uint8_t  data[SOCKADDR_MAX_LEN];
 } NVMI_STRUCT_ATTRIBS sock_addr_t;
 
 
 enum event_types {
-    EVENT_TYPE_NONE           = 0,
-    EVENT_TYPE_SYSCALL        = 1,
-    EVENT_TYPE_PROCESS_CREATE = 2, // process created, or first observed
-    EVENT_TYPE_PROCESS_DEATH  = 3, // process died (do_exit called)
-    EVENT_TYPE_FILE_CREATION  = 4,
+	EVENT_TYPE_NONE           = 0,
+	EVENT_TYPE_SYSCALL        = 1,
+	EVENT_TYPE_PROCESS_CREATE = 2, // process created, or first observed
+	EVENT_TYPE_PROCESS_DEATH  = 3, // process died (do_exit called)
+	EVENT_TYPE_FILE_CREATION  = 4,
 };
 
-typedef uint8_t event_type_t;
+typedef uint32_t event_type_t;
 
 //
 // Process create event -- relayed upon first event seen from process
@@ -69,11 +71,11 @@ typedef uint8_t event_type_t;
 //
 
 typedef struct _process_creation_event {
-    uint64_t uid;
-    uint64_t gid;
-    uint64_t pid;
-    char     comm[PROCESS_MAX_COMM_NAME];
-    char     path[PROCESS_MAX_PATH];
+	uint64_t uid;
+	uint64_t gid;
+	uint64_t pid;
+	char     comm[PROCESS_MAX_COMM_NAME];
+	char     path[PROCESS_MAX_PATH];
 } NVMI_STRUCT_ATTRIBS process_creation_event_t;
 
 
@@ -82,12 +84,12 @@ typedef struct _process_creation_event {
 //
 
 typedef struct _process_death_event {
-    uint32_t status; // ignored
+	uint32_t status; // ignored
 } NVMI_STRUCT_ATTRIBS process_death_event_t;
 
 
 typedef struct _file_creation_event {
-    uint32_t file_no;
+	uint32_t file_no;
 } NVMI_STRUCT_ATTRIBS file_creation_event_t;
 
 
@@ -95,44 +97,30 @@ typedef struct _file_creation_event {
 // Syscall event
 //
 
-// Syscall numbers: not necessarily tied to those used by system
-enum syscall_numbers {
-    SYSCALL_NONE   = 0,
-    SYSCALL_OPEN   = 1,
-    SYSCALL_OPENAT = 2,
-    SYSCALL_READ   = 3,
-    SYSCALL_WRITE  = 4,
-    // etc etc .....
-};
-
-typedef uint32_t syscall_number_t;
-
 enum syscall_arg_type {
-    // Scalar types: values held in syscall event's args
-    SYSCALL_ARG_TYPE_NONE   = 0,
-    SYSCALL_ARG_TYPE_SCALAR = 1, // includes bool, short, and int; signed and unsigned
-    SYSCALL_ARG_TYPE_PVOID  = 2, // void * - a pointer, but not dereferenced
+	// Scalar types: values held in syscall event's args
+	SYSCALL_ARG_TYPE_NONE   = 0,
+	SYSCALL_ARG_TYPE_SCALAR = 1, // includes bool, short, and int; signed and unsigned
+	SYSCALL_ARG_TYPE_PVOID  = 2, // void * - a pointer, but not dereferenced
 
-    // Array types: values held in syscall event's data 
-    SYSCALL_ARG_TYPE_STR      = 20, // char *
-    SYSCALL_ARG_TYPE_WSTR     = 21, // one wide char
-    SYSCALL_ARG_TYPE_SOCKADDR = 22, // sock_addr_t *, resolved
+	// Array types: values held in syscall event's data 
+	SYSCALL_ARG_TYPE_STR      = 20, // char *
+	SYSCALL_ARG_TYPE_WSTR     = 21, // wide char *
+	SYSCALL_ARG_TYPE_SOCKADDR = 22, // sock_addr_t *, resolved
 }; // syscall_arg_type_t;
 
-typedef uint8_t syscall_arg_type_t;
+typedef uint32_t syscall_arg_type_t;
 
 typedef struct _syscall_arg_t {
-    syscall_arg_type_t type;
-    length_t           len; // Valid only in case of complex data type
+	syscall_arg_type_t type;
+	length_t           len; // Valid only in case of complex data type
 
-    union {
-	int   int_val;
-	long  long_val;
-	char  char_val;
+	union {
+		uint64_t  long_val;
 
-	// In case of a complex type, its offset in the data buffer is here
-	offset_t offset;
-    } val;
+		// In case of a complex type, its offset in the data buffer is here
+		offset_t offset;
+	} val;
 } NVMI_STRUCT_ATTRIBS syscall_arg_t;
 
 
@@ -145,33 +133,34 @@ typedef struct _syscall_arg_t {
 #define SYSCALL_EVENT_FLAG_BUFFER_TRUNCATED 0x0002
 
 // All the consumable bits in the event flags are within this mask...
-#define SYSCALL_EVENT_EXTERNAL_MASK 0xff
+#define SYSCALL_EVENT_EXTERNAL_MASK 0xffff
 
 typedef uint32_t syscall_flags_t;
 
 typedef struct _syscall_event {
-    syscall_number_t    num;
-    syscall_flags_t     flags;
-    uint32_t            arg_ct;
-    syscall_arg_t       args[SYSCALL_MAX_ARGS];
+	char           name[SYSCALL_MAX_NAME_LEN];
+	uint32_t       flags;
+	uint32_t       arg_ct;
+	syscall_arg_t  args[SYSCALL_MAX_ARGS];
 
-    // Variable-length data associated with this syscall event
-    uint8_t             data[1];
+	// Variable-length data associated with this syscall event
+	uint8_t             data[SYSCALL_MAX_ARG_BUF];
 } NVMI_STRUCT_ATTRIBS syscall_event_t;
 
 
 // Every event will take this form...
 typedef struct _event_t {
-    uint32_t        event_len;
-    event_type_t    event_type;
-    process_ident_t context;
-    timeval_t       time;
+	uint32_t        len;
+	uint32_t        type;
+	process_ident_t context;
+	timeval_t       time;
+	char            comm[PROCESS_MAX_COMM_NAME];
 
-    union {
-	process_death_event_t death;
-	file_creation_event_t newfile;
-	syscall_event_t       syscall;
-    } u;
+	union {
+		process_death_event_t death;
+		file_creation_event_t newfile;
+		syscall_event_t       syscall;
+	} u;
 
 } NVMI_STRUCT_ATTRIBS event_t;
 
@@ -179,25 +168,33 @@ typedef struct _event_t {
 // Description of a request sent from the controller to the VMI component
 
 enum request_codes {
-    REQUEST_TYPE_NONE = 0,
-    REQUEST_TYPE_PROCKILL = 1,
+	REQUEST_CMD_NONE = 0,
+	REQUEST_CMD_PROCKILL = 1,
+	REQUEST_CMD_SET_EVENT_LIMIT = 2,
 };
-typedef uint16_t request_code_t;
+typedef uint32_t request_code_t;
 
 
 typedef struct _request_t {
-    request_code_t code;
-    uint64_t       request_id;
-    uint64_t       arg1;
-    uint64_t       arg2;
+	uint64_t       id;
+	request_code_t cmd;
+	uint64_t       arg1;
+	uint64_t       arg2;
 } NVMI_STRUCT_ATTRIBS request_t;
 
 
-// Response to request
+// Response to request: id fields match
 typedef struct _response {
-    uint64_t request_id;
-    uint32_t status;
+	uint64_t id;
+	uint32_t status; // 0 on success, otherwise a positive errno value
 } NVMI_STRUCT_ATTRIBS response_t;
 
 
 #endif // nvmi_iface_t
+
+/*
+ * Local variables:
+ * mode: C
+ * c-file-style: "linux"
+ * End:
+ */

@@ -24,7 +24,8 @@ typedef enum _nvmi_callback_type {
 
 
 /**
- * The types of syscall arguments supported
+ * The types of syscall arguments supported. Compare with strace(1)
+ * for inspiration on future types.
  */
 typedef enum _nvmi_arg_type {
 	NVMI_ARG_TYPE_NONE = 0,
@@ -33,7 +34,7 @@ typedef enum _nvmi_arg_type {
 	NVMI_ARG_TYPE_STR,    // char *
 	NVMI_ARG_TYPE_WSTR,   // wchar *
 	NVMI_ARG_TYPE_SA,     // sockaddr *, resolved
-	NVMI_ARG_TYPE_FDSET, // fd_set *, resolved ?
+	NVMI_ARG_TYPE_FDSET,  // fd_set *, resolved ?
 } nvmi_arg_type_t;
 
 
@@ -261,7 +262,7 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 		    { .type = NVMI_ARG_TYPE_PVOID  } } },
 
 
-	// !!!!!!!!!! INCOMPLETE/INCORRECT DEFS
+	// !!!!!!!!!! INCOMPLETE/INCORRECT DEF(S)
 	// While incorrect, keep argct == 0
 	// !!!!!!!!!!!!!!!!!!!!!!!!!!
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
