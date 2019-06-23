@@ -67,6 +67,7 @@
 
 #define KILL_PID_NONE ((vmi_pid_t)-1)
 
+
 //
 // Special instrumentation points
 //
@@ -87,9 +88,8 @@ nvmi_special_cbs[] =
 //
 
 typedef struct _nvmi_state {
-//	vmi_pid_t killpid;
-
 	int act_calls;
+	atomic_t event_id;
 
 	// Signal handler
 	struct sigaction act;
@@ -116,6 +116,9 @@ typedef struct _nvmi_state {
 	GRWLock context_lock;
 	
 	GThread * consumer_thread;
+
+	// Don't let the internal event queue grow larger than this size
+#define EVENT_QUEUE_MAX_LENGTH 100000
 	GAsyncQueue * event_queue;
 
 	// Handles inboudn requests over ZMQ
@@ -757,6 +760,7 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 	// arg / cbi tells us whether this is syscall or special event
 	nvmi_cb_info_t * cbi = (nvmi_cb_info_t *) arg;
 	nvmi_event_t * evt = NULL;
+	static bool size_warning = false;
 
 	// Ugly impl first: clean this up later
 	assert (NULL == cbi ||
@@ -805,7 +809,7 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 					      sizeof(ai),
 					      &ai,
 					      NULL);
-			if (VMI_FAILURE == status ) {
+			if (VMI_FAILURE == status) {
 				clog_warn (CLOG(CLOGGER_ID), "Failed to read addrinfo struct");
 				continue;
 			}
@@ -847,15 +851,18 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 				continue;
 			}
 
-			// It is feasible to kill the process. Do it intermittenly to avoid a loop.
-			if (++evt->task->kill_attempts % 10 != 0)
+			// It is feasible to kill the process. Do it
+			// intermittenly to avoid loop between us and
+			// the process or OS.
+			if (++evt->task->kill_attempts % 3 != 0)
 			{
 				continue;
 			}
 
 #define NVMI_BOGUS_REG_VAL 0xbadc0ffee
 			status = vmi_set_vcpureg (vmi, NVMI_BOGUS_REG_VAL, nvmi_syscall_arg_regs[i], event->vcpu_id);
-			if (VMI_FAILURE == status) {
+			if (VMI_FAILURE == status)
+			{
 				clog_warn (CLOG(CLOGGER_ID), "Failed to write syscall register #%d", i);
 				break;
 			}
@@ -863,7 +870,7 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 		}
 		if (attempted)
 		{
-			++evt->task->kill_attempts;
+			evt->task->kill_attempts;
 			clog_warn (CLOG(CLOGGER_ID), "Attempted to kill process %d, comm=%s %d times",
 				   evt->task->pid, evt->task->comm, evt->task->kill_attempts);
 		}
@@ -871,6 +878,23 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 
 	// The event owns a reference
 	atomic_inc (&evt->task->refct);
+	if (g_async_queue_length(gstate.event_queue) > EVENT_QUEUE_MAX_LENGTH)
+	{
+		if (!size_warning)
+		{
+			size_warning = true;
+			clog_error (CLOG(CLOGGER_ID),
+				   "Event queue length exceeds threshold (%d), new event(s) not pushed",
+				   EVENT_QUEUE_MAX_LENGTH);
+		}
+		// !!!! Destroy the un-consumed event. Do not push it. !!!!
+		g_slice_free (nvmi_event_t, evt);
+		goto exit;
+	}
+
+	// (Re)set to emit warning next time capacity is reached
+	size_warning = false;
+	evt->id = atomic_inc (&gstate.event_id);
 	g_async_queue_push (gstate.event_queue, (gpointer) evt);
 
 exit:
@@ -1149,6 +1173,7 @@ consume_syscall_event (nvmi_event_t * evt)
 	// General event data
 	event.len     = htobe32 (sizeof(event));
 	event.type    = htobe32 (EVENT_TYPE_SYSCALL);
+	event.id      = htobe64 (evt->id);
 	event.context = htobe64 (evt->task->pid);
 
 	(void) gettimeofday (&ts, NULL);
@@ -1256,14 +1281,9 @@ consume_syscall_event (nvmi_event_t * evt)
 	strncat (buf, buf2, sizeof(buf) - strlen(buf) - 1);
 
 	if (gstate.use_comms) {
-		//rc = nvmi_send_event (evt);
-		//if (rc) {
-		//clog_warn (CLOG(CLOGGER_ID), "Failed to send event!: %d", rc);
-		//}
-		//rc = zmq_send (gstate.zmq_event_socket, buf, strlen(buf)+1, 0);
 		rc = zmq_send (gstate.zmq_event_socket, &event, sizeof(event), 0);
 		if (rc < 0) {
-			clog_warn (CLOG(CLOGGER_ID),"zmq_send() failed: %d", rc);
+			clog_warn (CLOG(CLOGGER_ID),"zmq_send() failed: %d", zmq_errno());
 		}
 	}
 
@@ -1278,7 +1298,6 @@ consume_syscall_event (nvmi_event_t * evt)
 		g_rw_lock_writer_unlock (&gstate.context_lock);
 	}
 
-//exit:
 	return rc;
 }
 
@@ -1351,6 +1370,7 @@ exit:
 static void
 nvmi_main_fini (void)
 {
+	// FIXME:
 	if (gstate.consumer_thread) {
 		clog_info (CLOG(CLOGGER_ID), "Giving consumer thread time to leave.");
 		//g_thread_join (gstate.consumer_thread);
@@ -1358,14 +1378,14 @@ nvmi_main_fini (void)
 		clog_info (CLOG(CLOGGER_ID), "Consumer thread joined");
 		gstate.consumer_thread = NULL;
 	}
-
+/*
 	// releasing queue causes event consumer to return
 	if (gstate.event_queue) {
 		//g_async_queue_unref (gstate.event_queue);
 		//gstate.event_queue = NULL;
 	}
 	clog_info (CLOG(CLOGGER_ID), "Event queue dereferenced");
-
+*/
 	if (gstate.context_lookup) {
 		g_rw_lock_writer_lock (&gstate.context_lock);
 

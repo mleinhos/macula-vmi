@@ -46,7 +46,8 @@ static int nvmi_syscall_arg_regs[] = { RDI, RSI, RDX, R10, R8, R9 };
 
 
 /**
- * Here's all the data we collect on a process context.
+ * Here's all the data we collect on a process context. We also track
+ * our interaction with the process here.
  */
 typedef struct _nvmi_task_info
 {
@@ -60,22 +61,23 @@ typedef struct _nvmi_task_info
 	uint64_t   gid;
 	vmi_pid_t  pid;
 	char       comm[PROCESS_MAX_COMM_NAME];
-	char       path[PROCESS_MAX_PATH];
-
-	// How many live events reference this task info? Destroyed when 0.
-	unsigned long refct;
 
 	// TODO: get full path to binary via task->mm->??, since it's a file-backed mmap()
+	char       path[PROCESS_MAX_PATH];
 
-	// If not 0, this is the request ID that asked for the death of this process
+	// FIXME: How many live events reference this task info? Destroyed when 0.
+	unsigned long refct;
+
+	// If not 0, this is the request ID from NBrain that asked for the death of this process
 	uint64_t   pending_kill_request_id;
 	unsigned long kill_attempts;
 } nvmi_task_info_t;
 
 
-// TODO: exapnd for other event types
+// TODO: expand for other event types
 typedef struct _nvmi_event
 {
+	atomic_t         id;
 	nvmi_registers_t r;
 
 	// metadata about the event

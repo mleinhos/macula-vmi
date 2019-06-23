@@ -55,7 +55,7 @@ typedef struct _nvmi_cb_info {
 	// TODO: use bitfield, add flag for execve to invalidate cached context
 	bool does_deref;
 	bool enabled;
-	void * rtinfo; // runtime info
+
 	nvmi_syscall_arg_t args [NVMI_MAX_SYSCALL_ARG_CT];
 } nvmi_cb_info_t;
 
@@ -64,40 +64,47 @@ static nvmi_cb_info_t
 nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 {
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_open", .argct = 3, true, true, NULL,
+	  .name = "sys_open", .argct = 3, true, true,
 	  .args = { { .type = NVMI_ARG_TYPE_STR    },
 		    { .type = NVMI_ARG_TYPE_SCALAR } ,
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_openat", .argct = 4, true, true, NULL,
+	  .name = "sys_openat", .argct = 4, true, true,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_STR    },
 		    { .type = NVMI_ARG_TYPE_SCALAR },     // flags
 		    { .type = NVMI_ARG_TYPE_SCALAR } } }, // mode (opt)
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_stat", .argct = 2, true, true, NULL,
+	  .name = "sys_stat", .argct = 2, true, true,
 	  .args = { { .type = NVMI_ARG_TYPE_STR   },
 		    { .type = NVMI_ARG_TYPE_PVOID } } },
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_fstat", .argct = 2, false, true, NULL,
+	  .name = "sys_fstat", .argct = 2, false, true,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_PVOID } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_lstat", .argct = 2, true, true, NULL,
+	  .name = "sys_lstat", .argct = 2, true, true,
 	  .args = { { .type = NVMI_ARG_TYPE_STR },
 		    { .type = NVMI_ARG_TYPE_PVOID } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_poll", .argct = 3, false, true, NULL,
+	  .name = "sys_poll", .argct = 3, false, false,
 	  .args = { { .type = NVMI_ARG_TYPE_PVOID },
 		    { .type = NVMI_ARG_TYPE_SCALAR  },
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_select", .argct = 5, false, true, NULL,
+	  .name = "sys_ppoll", .argct = 4, false, false,
+	  .args = { { .type = NVMI_ARG_TYPE_PVOID },
+		    { .type = NVMI_ARG_TYPE_SCALAR },
+		    { .type = NVMI_ARG_TYPE_PVOID },
+		    { .type = NVMI_ARG_TYPE_PVOID } } },
+
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_select", .argct = 5, false, false,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_PVOID  }, // fd_set *
 		    { .type = NVMI_ARG_TYPE_PVOID  }, // fd_set *
@@ -105,37 +112,37 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 		    { .type = NVMI_ARG_TYPE_PVOID } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_inotify_add_watch", .argct = 3, true, true, NULL,
+	  .name = "sys_inotify_add_watch", .argct = 3, true, true,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_PVOID    }, // STR - but doesn't resolve
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_inotify_rm_watch", .argct = 2, false, true, NULL,
+	  .name = "sys_inotify_rm_watch", .argct = 2, false, true,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_read", .argct = 3, false, true, NULL,
+	  .name = "sys_read", .argct = 3, false, true,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_PVOID  },
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
 	// Network stuff
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_bind", .argct = 3, true, true, NULL,
+	  .name = "sys_bind", .argct = 3, true, true,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_SA     } ,
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_connect", .argct = 3, true, true, NULL,
+	  .name = "sys_connect", .argct = 3, true, true,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_SA     } ,
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_setsockopt", .argct = 5, false, true, NULL,
+	  .name = "sys_setsockopt", .argct = 5, false, true,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_SCALAR },
@@ -143,7 +150,7 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_getsockopt", .argct = 5, false, true, NULL,
+	  .name = "sys_getsockopt", .argct = 5, false, true,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_SCALAR },
@@ -151,49 +158,49 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 		    { .type = NVMI_ARG_TYPE_PVOID  } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_send", .argct = 5, false, true, NULL,
+	  .name = "sys_send", .argct = 5, false, true,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_PVOID  },
 		    { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_PVOID  } } },
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_sendmsg", .argct = 6, false, true, NULL,
+	  .name = "sys_sendmsg", .argct = 6, false, true,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_PVOID  },
 		    { .type = NVMI_ARG_TYPE_SCALAR  } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_recv", .argct = 5, false, true, NULL,
+	  .name = "sys_recv", .argct = 5, false, true,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_PVOID  },
 		    { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_PVOID  } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_recvmsg", .argct = 6, false, true, NULL,
+	  .name = "sys_recvmsg", .argct = 6, false, true,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_PVOID  },
 		    { .type = NVMI_ARG_TYPE_SCALAR  } } },
 	
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_write", .argct = 3, false, true, NULL,
+	  .name = "sys_write", .argct = 3, false, true,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_PVOID },
 		    { .type = NVMI_ARG_TYPE_SCALAR} } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_close", .argct = 1, false, true, NULL,
+	  .name = "sys_close", .argct = 1, false, true,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR }} },
 
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_gettimeofday", .argct = 2, false, false, NULL,  // verbose
+	  .name = "sys_gettimeofday", .argct = 2, false, false,  // verbose
 	  .args = { { .type = NVMI_ARG_TYPE_PVOID },
 		    { .type = NVMI_ARG_TYPE_PVOID } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_mmap", .argct = 6, false, true, NULL,
+	  .name = "sys_mmap", .argct = 6, false, true,
 	  .args = { { .type = NVMI_ARG_TYPE_PVOID },
 		    { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_SCALAR },
@@ -202,61 +209,61 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_munmap", .argct = 3, false, true, NULL,
+	  .name = "sys_munmap", .argct = 3, false, true,
 	  .args = { { .type = NVMI_ARG_TYPE_PVOID },
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_lseek", .argct = 3, false, true, NULL,
+	  .name = "sys_lseek", .argct = 3, false, true,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_SCALAR } ,
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_chown", .argct = 3, true, true, NULL,
+	  .name = "sys_chown", .argct = 3, true, true,
 	  .args = { { .type = NVMI_ARG_TYPE_STR },
 		    { .type = NVMI_ARG_TYPE_SCALAR } ,
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_execve", .argct = 3, true, true, NULL,
+	  .name = "sys_execve", .argct = 3, true, true,
 	  .args = { { .type = NVMI_ARG_TYPE_STR }, // filename
 		    { .type = NVMI_ARG_TYPE_PVOID } , // char * argv[]
 		    { .type = NVMI_ARG_TYPE_PVOID } } }, // char * envp[]
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_getuid",  .argct = 0, false, true, NULL, .args = {} },
+	  .name = "sys_getuid",  .argct = 0, false, true, .args = {} },
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_geteuid", .argct = 0, false, true, NULL, .args = {} },
+	  .name = "sys_geteuid", .argct = 0, false, true, .args = {} },
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_getpid",  .argct = 0, false, false, NULL, .args = {} }, // verbose
+	  .name = "sys_getpid",  .argct = 0, false, false, .args = {} }, // verbose
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_getpgrp", .argct = 0, false, true, NULL, .args = {} },
+	  .name = "sys_getpgrp", .argct = 0, false, true, .args = {} },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_wait4", .argct = 3, false, false, NULL, // very verbose!
+	  .name = "sys_wait4", .argct = 3, false, false, // very verbose!
 	  .args = { { .type = NVMI_ARG_TYPE_PVOID },
 		    { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_PVOID  } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_clock_gettime", .argct = 2, false, false, NULL, // fairly verbose!
+	  .name = "sys_clock_gettime", .argct = 2, false, false, // fairly verbose!
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_PVOID  } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_rt_sigaction", .argct = 3, false, true, NULL,
+	  .name = "sys_rt_sigaction", .argct = 3, false, true,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_PVOID  },
 		    { .type = NVMI_ARG_TYPE_PVOID  } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_sigprocmask", .argct = 3, false, true, NULL,
+	  .name = "sys_sigprocmask", .argct = 3, false, true,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_PVOID  },
 		    { .type = NVMI_ARG_TYPE_PVOID  } } },
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_rt_sigprocmask", .argct = 3, false, true, NULL,
+	  .name = "sys_rt_sigprocmask", .argct = 3, false, true,
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_PVOID  },
 		    { .type = NVMI_ARG_TYPE_PVOID  } } },
@@ -266,7 +273,7 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 	// While incorrect, keep argct == 0
 	// !!!!!!!!!!!!!!!!!!!!!!!!!!
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_futex", .argct = 0, false, true, NULL, .args = {} },
+	  .name = "sys_futex", .argct = 0, false, false, .args = {} },
 
 };
 

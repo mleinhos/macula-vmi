@@ -2,40 +2,41 @@
 
 ##
 ## Provides interface to NInspector via ZMQ channels.
-## 
+##
 
 ##
 ## Events represent syscalls that occured on the DomU, and are
 ## returned to the caller as dictionaries with these keys:
-##  - time
-##  - pid
-##  - 
-
+##  - id - a domU-unique (within constraints of 64-bit value) ID of the event
+##  - time - time of event
+##  - pid - PID where event occured
+##  - pname - process name where event occured
+##  - type - the type of event:  "syscall", "proc_create", "proc_death", or "file_create"
 
 import time
 import zmq
 import struct
-#import itertools
 import struct
 
 syscall_ct = dict() # map PID --> calls seen
 
 # Header for every event
-evt_fmt = "IIQQQ32s"
+evt_fmt = "IIQQQQ32s"
 
-# Next, header for syscall event
+#
+# Syscall event format:
+#
 evt_syscall_fmt = "32sII"
-#max_arg_ct = 6
-# 
+
+# Syscall arguments: a single arg looks like this...
 evt_syscall_arg_fmt = "IIQ"
+# ... and altogether here's the format, followed by a data buffer
+evt_syscall_args = 6 * evt_syscall_arg_fmt
 
-evt_syscall_args = 6 * evt_syscall_arg_fmt# + "1024s"
 
-SYSCALL_EVENT_FLAG_HAS_BUFFER       = 0x0001 
+
+SYSCALL_EVENT_FLAG_HAS_BUFFER       = 0x0001
 SYSCALL_EVENT_FLAG_BUFFER_TRUNCATED = 0x0002
-
-#evt_syscall_flag_has_buffer   = 0x01
-#evt_syscall_flag_buffer_trunc = 0x02
 
 EVENT_TYPE_NONE           = 0
 EVENT_TYPE_SYSCALL        = 1
@@ -64,22 +65,28 @@ class nvmi_iface:
         self._request_id = 1 # starting request ID
         self.pending_kills = dict() # maps: PID -> request id
 
-
     def _get_next_request_id(self):
-
         while 0 == self._request_id:
             self._request_id += 1
-            
+
         return self._request_id
+
+    def _decode_str_bytes(self, data):
+        try:
+            return data.decode('utf-8', 'replace').rstrip('\0')
+        except UnicodeDecodeError as e:
+                print ("Encountered invalid encoding in {}".format(data))
+                import pdb;pdb.set_trace()
+                return None
 
     def get_event(self):
         msg = self.echannel.recv()
         rval = dict() # returned to caller
         ofs = 0
-        
+
         while True:
             try:
-                (elen, etype, epid, ets_s, ets_us, ecomm) = \
+                (elen, etype, eid, epid, ets_s, ets_us, ecomm) = \
                     struct.unpack("!" + evt_fmt,
                                   msg[0:struct.calcsize(evt_fmt)])
 
@@ -88,16 +95,12 @@ class nvmi_iface:
                                  EVENT_TYPE_PROCESS_DEATH  : "proc_death",
                                  EVENT_TYPE_FILE_CREATION  : "file_create"} [etype]
 
+                rval['id']    = eid
                 rval['time']  = ets_s + 1.0 * ets_us / 1000000.
                 rval['pid']   = epid
                 rval['pname'] = ecomm.decode().rstrip('\0')
 
                 ofs += struct.calcsize(evt_fmt)
-                
-                #rval = dict (zip( ('len', 'type', 'pid', 'time_sec', 'time_usec', 'pname'),
-                #                  struct.unpack("!" + "IIQQQ32s", #nvmi_iface.evt_fmt,
-                #                                msg[0:struct.calcsize(nvmi_iface.evt_fmt)])))
-
 
                 # get syscall info
                 if EVENT_TYPE_SYSCALL == etype:
@@ -106,7 +109,8 @@ class nvmi_iface:
 
                     data = msg[struct.calcsize(evt_fmt + evt_syscall_fmt + evt_syscall_args):]
                     ofs += struct.calcsize(evt_syscall_fmt)
-                    rval['syscall_name'] = ename.decode().rstrip('\0')
+                    rval['syscall_name'] = self._decode_str_bytes(ename)
+
                     args = list()
                     for i in range(eargct):
                         (atype, alen, aval) = struct.unpack("!" + evt_syscall_arg_fmt,
@@ -114,20 +118,19 @@ class nvmi_iface:
                         ofs += struct.calcsize(evt_syscall_arg_fmt)
 
                         if atype in (SYSCALL_ARG_TYPE_STR, SYSCALL_ARG_TYPE_WSTR):
-                            args.append(data[aval: aval + alen].decode().rstrip('\0'))
+                            args.append(self._decode_str_bytes(data[aval: aval + alen]))
                         else:
                             args.append(aval)
 
                     rval['args'] = args
 
                 self.ecount += 1
-                print (rval)
-                return rval
 
-            except UnicodeDecodeError as e:
-                # skip it
-                print ("Encountered invalid encoding")
-                continue
+                print (rval)
+
+                # store the original message so caller can send it elsewhere if needed
+                rval['raw'] = msg
+                return rval
 
             except Exception as  e:
                 import pdb;pdb.set_trace()
@@ -184,7 +187,7 @@ if __name__ == '__main__':
 
     while True:
         evt = nvmi.get_event()
-        print (evt)
+        print ([evt[k] for k in evt if k is not 'raw'])
 
         pname = evt['pname']
         pid   = evt['pid']

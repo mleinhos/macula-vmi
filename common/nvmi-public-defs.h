@@ -152,6 +152,7 @@ typedef struct _syscall_event {
 typedef struct _event_t {
 	uint32_t        len;
 	uint32_t        type;
+	uint64_t        id;
 	process_ident_t context;
 	timeval_t       time;
 	char            comm[PROCESS_MAX_COMM_NAME];
