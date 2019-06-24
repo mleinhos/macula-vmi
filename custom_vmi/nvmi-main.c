@@ -105,6 +105,7 @@ typedef struct _nvmi_state {
 
 	addr_t va_current_task;
 
+	bool dump_stats;
 	bool use_comms;
 	void* zmq_context;
 	void* zmq_event_socket;
@@ -114,7 +115,7 @@ typedef struct _nvmi_state {
 	// task_struct, or base kernel stack pointer.
 	GHashTable * context_lookup;
 	GRWLock context_lock;
-	
+
 	GThread * consumer_thread;
 
 	// Don't let the internal event queue grow larger than this size
@@ -184,6 +185,30 @@ close_handler(int sig)
 	if (!gstate.interrupted) {
 		gstate.interrupted = true;
 		nif_stop();
+	}
+}
+
+static void
+dump_cb_stats(void)
+{
+	clog_warn (CLOG(CLOGGER_ID), "Event count: %ld", gstate.event_id);
+
+	for (int i = 0; i < NUMBER_OF(nvmi_syscalls); ++i)
+	{
+		nvmi_cb_info_t * cbi = &nvmi_syscalls[i];
+		if (0 == cbi->hitct) continue;
+
+		clog_warn (CLOG(CLOGGER_ID), "Called % 16d times: %s",
+			   cbi->hitct, cbi->name);
+	}
+
+	for (int i = 0; i < NUMBER_OF(nvmi_special_cbs); ++i)
+	{
+		nvmi_cb_info_t * cbi = &nvmi_special_cbs[i];
+		if (0 == cbi->hitct) continue;
+
+		clog_warn (CLOG(CLOGGER_ID), "Called % 16d times: %s",
+			   cbi->hitct, cbi->name);
 	}
 }
 
@@ -473,7 +498,30 @@ cb_build_task_context (vmi_instance_t vmi,
 #endif
 
 #if defined(X86_64) || defined(EXPERIMENTAL_ARM_FEATURES)
-	// Yes, these things are either wrong or cause an infinite loop on ARM
+	// Yes, these things are either wrong or cause an infinite
+	// loop on ARM. On Intel the task_struct sometimes can't be
+	// found for the call below.
+	/*
+	// Read current->mm
+	status = vmi_read_addr_va (vmi, curr_task + gstate.task_mm_ofs, 0, &task_mm);
+	if (VMI_FAILURE == status) {
+		rc = EIO;
+		clog_warn (CLOG(CLOGGER_ID), "Failed to read current->mm");
+		goto exit;
+	}
+
+	// Read current->mm->pgd: Yields wrong result on ARM
+	status = vmi_read_addr_va (vmi, task_mm + gstate.mm_pgd_ofs, 0, &(*tinfo)->task_dtb);
+	if (VMI_FAILURE == status) {
+		rc = EIO;
+		clog_warn (CLOG(CLOGGER_ID), "Failed to read mm->pgd");
+		goto exit;
+	}
+
+	clog_debug (CLOG(CLOGGER_ID), "(task->mm->pgd: PID %d --> dtb %lx",
+		 (uint32_t) (*tinfo)->pid,
+		 (*tinfo)->task_dtb);
+	*/
 
 	status = vmi_pid_to_dtb (vmi, (*tinfo)->pid, &(*tinfo)->task_dtb);
 	if (VMI_FAILURE == status) {
@@ -485,6 +533,7 @@ cb_build_task_context (vmi_instance_t vmi,
 	clog_debug (CLOG(CLOGGER_ID), "vmi_pid_to_dtb: PID %d --> dtb %lx",
 		 (uint32_t) (*tinfo)->pid,
 		 (*tinfo)->task_dtb);
+
 #endif
 	clog_debug (CLOG(CLOGGER_ID), "Build context: task=%lx (key) pid=%d comm=%s",
 		    curr_task, (*tinfo)->pid, (*tinfo)->comm);
@@ -577,7 +626,7 @@ find_task_context_by_pid (vmi_pid_t pid,
 
 	// TODO: we're iterating over the contexts without a lock. Is this OK?
 	g_rw_lock_reader_lock (&gstate.context_lock);
-	
+
 	tasks = g_hash_table_get_values (gstate.context_lookup);
 
 	for (elem = tasks; elem != NULL; elem = elem->next)
@@ -622,7 +671,13 @@ read_user_mem (vmi_instance_t vmi,
 #if defined(X86_64) || defined(EXPERIMENTAL_READ_USERMEM)
 	// Actually try to pull the contents out of user memory
 
-	// TODO: use a faster technique - ideally calling this while target process is in scope but
+	// TODO: use a faster technique - ideally calling this while
+	// target process is in scope but not directly in event
+	// callback stack.
+	//
+	// TODO: write own impl of this function, using already-known
+	// dtb and writing contents directly into caller-supplied
+	// buffer.
 	str = vmi_read_str_va (vmi, va, evt->task->pid);
 	if (NULL == str) {
 		clog_info (CLOG(CLOGGER_ID),"Error: could not read string at %" PRIx64 " in PID %d",
@@ -748,7 +803,7 @@ exit:
 /**
  * cb_pre_instr_pt()
  *
- * Called at beginning of a syscall.
+ * Called as entry point to any event callback.
  * TODO: Shift as much of this work as possible to a worker thread.
  */
 static void
@@ -776,6 +831,9 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 		goto exit;
 	}
 
+	atomic_inc (&cbi->hitct);
+
+	// Only syscall events have arguments to parse
 	for (int i = 0; i < cbi->argct; ++i) {
 		reg_t val = evt->r.syscall_args[i];
 		char * buf = NULL;
@@ -792,7 +850,10 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 				clog_warn (CLOG(CLOGGER_ID), "Failed to read str syscall arg");
 				continue;
 			}
-			// Only worry about 1 dereferenced pointer, for now
+
+			// Only worry about 1 dereferenced pointer,
+			// for now. TODO: Is there a syscall with
+			// multiple arguments to dereference?
 			evt->mem_ofs[i] = 0;
 			evt->arg_lens[i] = MIN(sizeof(evt->mem), strlen(buf));
 			strncpy (evt->mem, buf, evt->arg_lens[i]);
@@ -1020,11 +1081,11 @@ instrument_syscall (char *name, addr_t kva)
 		clog_info (CLOG(CLOGGER_ID), "monitoring syscall %s without a template", name);
 		cbi = &nvmi_syscalls[nvmi_syscall_new++];
 		cbi->cb_type = NVMI_CALLBACK_SYSCALL;
-		cbi->enabled = true;
+		cbi->state.enabled = true;
 		strncpy (cbi->name, name, SYSCALL_MAX_NAME_LEN);
 	}
 
-	if (!cbi->enabled) {
+	if (!cbi->state.enabled) {
 		rc = ENOENT; // not quite right
 		goto exit;
 	}
@@ -1168,6 +1229,11 @@ consume_syscall_event (nvmi_event_t * evt)
 	assert (cbi);
 	assert (cbi->cb_type == NVMI_CALLBACK_SYSCALL);
 
+	if (gstate.dump_stats && evt->id % 100000 == 0)
+	{
+		dump_cb_stats();
+	}
+
 	snprintf (buf, sizeof(buf), "syscall=%s(", cbi->name);
 
 	// General event data
@@ -1289,10 +1355,11 @@ consume_syscall_event (nvmi_event_t * evt)
 
 	clog_info (CLOG(CLOGGER_ID), "%s", buf);
 
-	// If the process context is being replaced, destroy it now to force rebuild.
-	if (0 == strcmp ("sys_execve", cbi->name))
+	// If the syscall triggers a process context reset, destroy it now to force rebuild.
+	if (cbi->state.reset_ctx)
 	{
 		clog_info (CLOG(CLOGGER_ID), "Invalidating context of task pid=%d", evt->task->pid);
+
 		g_rw_lock_writer_lock (&gstate.context_lock);
 		g_hash_table_remove (gstate.context_lookup, (gpointer) evt->task->key);
 		g_rw_lock_writer_unlock (&gstate.context_lock);
@@ -1426,7 +1493,7 @@ nvmi_main_init (void)
 						       NULL, // key equal
 						       NULL, // key destroy
 						       NULL); //deref_task_context); // TODO: impl ctx refct
-	
+
 	status |= vmi_get_kernel_struct_offset (vmi, "task_struct", "comm", &gstate.task_name_ofs);
 	status |= vmi_get_kernel_struct_offset (vmi, "task_struct", "pid",  &gstate.task_pid_ofs);
 	status |= vmi_get_kernel_struct_offset (vmi, "task_struct", "mm",   &gstate.task_mm_ofs);
@@ -1649,7 +1716,7 @@ main (int argc, char* argv[])
 
 	gstate.use_comms = true;
 
-	while ((opt = getopt(argc, argv, ":o:sv")) != -1) {
+	while ((opt = getopt(argc, argv, ":o:svd")) != -1) {
 		switch (opt) {
 		case 'o':
 			log_file = optarg;
@@ -1659,6 +1726,9 @@ main (int argc, char* argv[])
 			break;
 		case 's':
 			gstate.use_comms = false;
+			break;
+		case 'd':
+			gstate.dump_stats = true;
 			break;
 		case '?':
 			fprintf (stderr, "Illegal option: %c\n", optopt);
@@ -1674,6 +1744,7 @@ main (int argc, char* argv[])
 		printf("\t-v Increases verbosity of output logging, can be specified several times.\n");
 		printf("\t-o Specifies file where output logging goes. Default is stderr.\n");
 		printf("\t-s Run in silent mode - do not output events to brain.\n");
+		printf("\t-d Periodically dump callback statistics to logging target.\n");
 		return 1;
 	}
 
