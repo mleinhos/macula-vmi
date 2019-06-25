@@ -16,7 +16,8 @@
 #include "nvmi-common.h"
 
 
-typedef enum _nvmi_callback_type {
+typedef enum _nvmi_callback_type
+{
 	NVMI_CALLBACK_NONE = 0,
 	NVMI_CALLBACK_SYSCALL,
 	NVMI_CALLBACK_SPECIAL,
@@ -27,21 +28,26 @@ typedef enum _nvmi_callback_type {
  * The types of syscall arguments supported. Compare with strace(1)
  * for inspiration on future types.
  */
-typedef enum _nvmi_arg_type {
+typedef enum _nvmi_arg_type
+{
 	NVMI_ARG_TYPE_NONE = 0,
 	NVMI_ARG_TYPE_SCALAR, // any long value that is not dereferenced, but NOT pointers
 	NVMI_ARG_TYPE_PVOID,  // a pointer that we will NOT dereference
+
+	// The following arguments *should* be dereferenced
 	NVMI_ARG_TYPE_STR,    // char *
 	NVMI_ARG_TYPE_WSTR,   // wchar *
 	NVMI_ARG_TYPE_SA,     // sockaddr *, resolved
 	NVMI_ARG_TYPE_FDSET,  // fd_set *, resolved ?
+	NVMI_ARG_TYPE_POLLFD, // struct pollfd *, resolved ?
 } nvmi_arg_type_t;
 
 
 /**
  * Definition of a syscall argument
  */
-typedef struct _nvmi_syscall_arg {
+typedef struct _nvmi_syscall_arg
+{
 	enum syscall_arg_type type;
 } nvmi_syscall_arg_t;
 
@@ -51,7 +57,8 @@ typedef struct _nvmi_syscall_arg {
  * geared toward syscalls but is intended for all kernel events
  * (breakpoints) we care about.
  */
-typedef struct _nvmi_cb_info {
+typedef struct _nvmi_cb_info
+{
 	nvmi_callback_type_t cb_type;
 	char name[SYSCALL_MAX_NAME_LEN];
 
@@ -59,11 +66,15 @@ typedef struct _nvmi_cb_info {
 	atomic_t hitct;
 
 	// (Immutable) attributes and (mutable) state of the callback, intermingled here
-	struct {
+	struct
+	{
+		// immutable attributes
 		unsigned long derefs    : 1; // dereferences guest memory
 		unsigned long sticky    : 1; // cannot be disabled
-		unsigned long enabled   : 1; // is currently enabled
 		unsigned long reset_ctx : 1; // triggers reset in process context, e.g. sys_exec* family
+
+		// mutable state
+		unsigned long enabled   : 1; // is currently enabled
 	} state;
 
 	// Syscall-specific stuff
@@ -109,28 +120,31 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 	  .args = { { .type = NVMI_ARG_TYPE_STR },
 		    { .type = NVMI_ARG_TYPE_PVOID } } },
 
+	//
+	// Poll / select syscalls: prime candidates for disabling
+	//
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
 	  .name = "sys_poll", .argct = 3,
-	  .state = { .enabled = 0},
-	  .args = { { .type = NVMI_ARG_TYPE_PVOID },
+	  .state = { .enabled = 1},
+	  .args = { { .type = NVMI_ARG_TYPE_POLLFD },
 		    { .type = NVMI_ARG_TYPE_SCALAR  },
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
 	  .name = "sys_ppoll", .argct = 4,
-	  .state = { .enabled = 0},
-	  .args = { { .type = NVMI_ARG_TYPE_PVOID },
+	  .state = { .enabled = 1},
+	  .args = { { .type = NVMI_ARG_TYPE_POLLFD },
 		    { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_PVOID },
 		    { .type = NVMI_ARG_TYPE_PVOID } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
 	  .name = "sys_select", .argct = 5,
-	  .state = { .enabled = 0},
+	  .state = { .enabled = 1},
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
-		    { .type = NVMI_ARG_TYPE_PVOID  }, // fd_set *
-		    { .type = NVMI_ARG_TYPE_PVOID  }, // fd_set *
-		    { .type = NVMI_ARG_TYPE_PVOID  }, // fd_set *
+		    { .type = NVMI_ARG_TYPE_FDSET  },
+		    { .type = NVMI_ARG_TYPE_FDSET  },
+		    { .type = NVMI_ARG_TYPE_FDSET  },
 		    { .type = NVMI_ARG_TYPE_PVOID } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
@@ -328,5 +342,7 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 	  .state = { .enabled = 0} },
 
 };
+
+
 
 #endif // NVMI_EVENT_TEMPLATES_H
