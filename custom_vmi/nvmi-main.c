@@ -75,9 +75,11 @@ static nvmi_cb_info_t
 nvmi_special_cbs[] =
 {
 #define NVMI_DO_EXIT_IDX 0
-	{ .cb_type = NVMI_CALLBACK_SPECIAL, .name = "do_exit" },
+	{ .cb_type = NVMI_CALLBACK_SPECIAL, .name = "do_exit", .argct = 0 },
 #define NVMI_FD_INSTALL_IDX 1
-	{ .cb_type = NVMI_CALLBACK_SPECIAL, .name = "fd_install" },
+	{ .cb_type = NVMI_CALLBACK_SPECIAL, .name = "fd_install", .argct = 6 },
+#define NVMI_DO_FORK_IDX 2
+	{ .cb_type = NVMI_CALLBACK_SPECIAL, .name = "_do_fork" },
 };
 
 
@@ -191,7 +193,7 @@ close_handler(int sig)
 static void
 dump_cb_stats(void)
 {
-	clog_warn (CLOG(CLOGGER_ID), "Event count: %ld", gstate.event_id);
+	clog_warn (CLOG(CLOGGER_ID), "*************** BEGIN STATISTICS ****************" );
 
 	for (int i = 0; i < NUMBER_OF(nvmi_syscalls); ++i)
 	{
@@ -210,6 +212,8 @@ dump_cb_stats(void)
 		clog_warn (CLOG(CLOGGER_ID), "Called % 16d times: %s",
 			   cbi->hitct, cbi->name);
 	}
+	clog_warn (CLOG(CLOGGER_ID), "Event count: %ld", gstate.event_id);
+	clog_warn (CLOG(CLOGGER_ID), "*************** END STATISTICS ****************" );
 }
 
 
@@ -680,8 +684,9 @@ read_user_mem (vmi_instance_t vmi,
 	// buffer.
 	str = vmi_read_str_va (vmi, va, evt->task->pid);
 	if (NULL == str) {
-		clog_info (CLOG(CLOGGER_ID),"Error: could not read string at %" PRIx64 " in PID %d",
-			va, evt->task->pid);
+		clog_error (CLOG(CLOGGER_ID),
+			    "Error: could not read string at %" PRIx64 " in PID %d",
+			    va, evt->task->pid);
 		goto failsafe;
 	}
 
@@ -817,6 +822,7 @@ cb_pre_instr_kill_process (vmi_instance_t vmi, nvmi_event_t * evt, vmi_event_t* 
 	// arch/arm64/kernel/entry.S
 	// Clobber the pointer (void *) registers
 	// gstate.killpid stays set until the process dies (which is a special event)
+
 	for (int i = 0; i < cbi->argct; ++i)
 	{
 		if (cbi->args[i].type != NVMI_ARG_TYPE_PVOID
@@ -867,30 +873,24 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 {
 	int rc = 0;
 	status_t status = VMI_SUCCESS;
-
-	// arg / cbi tells us whether this is syscall or special event
 	nvmi_cb_info_t * cbi = (nvmi_cb_info_t *) arg;
 	nvmi_event_t * evt = NULL;
 	static bool size_warning = false;
+	int dataofs = 0;
 
-	// Ugly impl first: clean this up later
-	assert (NULL == cbi ||
-		cbi->argct <= NUMBER_OF(nvmi_syscall_arg_regs));
+	assert (cbi);
 
 	rc = cb_gather_context (vmi, event, cbi, &evt);
-	if (rc) {
-		goto exit;
-	}
-
-	if (NULL == cbi) {
-		// We don't have any metadata on this event
+	if (rc)
+	{
 		goto exit;
 	}
 
 	atomic_inc (&cbi->hitct);
 
 	// Only syscall events have arguments to parse
-	for (int i = 0; i < cbi->argct; ++i) {
+	for (int i = 0; i < cbi->argct; ++i)
+	{
 		reg_t val = evt->r.syscall_args[i];
 		char * buf = NULL;
 
@@ -904,18 +904,17 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 			break;
 		case NVMI_ARG_TYPE_STR:
 			buf = read_user_mem (vmi, evt, val, 0, 0);
-			if (NULL == buf) {
+			if (NULL == buf)
+			{
 				clog_warn (CLOG(CLOGGER_ID), "Failed to read str syscall arg");
 				continue;
 			}
 
-			// Only worry about 1 dereferenced pointer,
-			// for now. TODO: Is there a syscall with
-			// multiple arguments to dereference?
-			evt->mem_ofs[i] = 0;
-			evt->arg_lens[i] = MIN(sizeof(evt->mem), strlen(buf));
+			evt->mem_ofs[i] = dataofs;
+			evt->arg_lens[i] = MIN(sizeof(evt->mem) - dataofs, strlen(buf));
 			strncpy (evt->mem, buf, evt->arg_lens[i]);
 			free (buf);
+			dataofs += evt->arg_lens[i];
 			break;
 		case NVMI_ARG_TYPE_SA: {
 #if 0
@@ -928,13 +927,15 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 					      sizeof(ai),
 					      &ai,
 					      NULL);
-			if (VMI_FAILURE == status) {
+			if (VMI_FAILURE == status)
+			{
 				clog_warn (CLOG(CLOGGER_ID), "Failed to read addrinfo struct");
 				continue;
 			}
 
 			rc = getaddrinfo (NULL, NULL, (const struct addrinfo *) &ai, &res);
-			if (rc) {
+			if (rc)
+			{
 				clog_warn (CLOG(CLOGGER_ID), "Failed to decode addrinfo struct");
 				continue;
 			}
@@ -1187,11 +1188,33 @@ exit:
 }
 
 
+static void
+populate_outbound_event (nvmi_event_t * inevent,
+			 enum event_types etype,
+			 event_t * outevent)
+{
+	struct timeval ts;
+
+	// General event data
+	outevent->len     = htobe32 (sizeof(*outevent));
+	outevent->type    = htobe32 (etype);
+	outevent->id      = htobe64 (inevent->id);
+	outevent->context = htobe64 (inevent->task->pid);
+
+	(void) gettimeofday (&ts, NULL);
+	outevent->time.sec  = htobe64 (ts.tv_sec);
+	outevent->time.usec = htobe64 (ts.tv_usec);
+	strncpy (outevent->comm, inevent->task->comm, sizeof(outevent->comm));
+}
+
+
 static int
 consume_special_event (nvmi_event_t * evt)
 {
 	int rc = 0;
 	nvmi_cb_info_t * cbi = evt->cbi;
+	event_t event = {0};
+	bool event_ready = true;
 
 	assert (cbi);
 	assert (cbi->cb_type == NVMI_CALLBACK_SPECIAL);
@@ -1203,7 +1226,15 @@ consume_special_event (nvmi_event_t * evt)
 	{
 		// handle process destruction
 		clog_info (CLOG(CLOGGER_ID), "exit of process pid %ld proc %s",
-			 evt->task->pid, evt->task->comm);
+			   evt->task->pid, evt->task->comm);
+
+		populate_outbound_event (evt, EVENT_TYPE_PROCESS_DEATH, &event);
+		event.u.pcreate.uid = htobe64 (evt->task->uid);
+		event.u.pcreate.gid = htobe64 (evt->task->gid);
+		event.u.pcreate.pid = htobe64 (evt->task->pid);
+		strncpy (event.u.pcreate.comm, evt->task->comm, sizeof(event.u.pcreate.comm));
+
+		event_ready = true;
 
 		// Did brain ask for this destruction?
 		if (evt->task->pending_kill_request_id) {
@@ -1228,6 +1259,33 @@ consume_special_event (nvmi_event_t * evt)
 		g_hash_table_remove (gstate.context_lookup, (gpointer) evt->task->key);
 		g_rw_lock_writer_unlock (&gstate.context_lock);
 	}
+	else if (cbi == &nvmi_special_cbs[NVMI_FD_INSTALL_IDX])
+	{
+		populate_outbound_event (evt, EVENT_TYPE_FILE_CREATE, &event);
+
+//		asm("int $3;");
+#if defined(ARM64)
+		event.u.fcreate.file_no = htobe32 (evt->r.arm.x0);
+#else
+		event.u.fcreate.file_no = htobe32 (evt->r.x86.r.rdi);
+#endif
+	}
+	else if (cbi == &nvmi_special_cbs[NVMI_DO_FORK_IDX])
+	{
+		populate_outbound_event (evt, EVENT_TYPE_PROCESS_CREATE, &event);
+	}
+	else
+	{
+		event_ready = false;
+	}
+	
+	if (gstate.use_comms && event_ready)
+	{
+		rc = zmq_send (gstate.zmq_event_socket, &event, sizeof(event), 0);
+		if (rc < 0) {
+			clog_warn (CLOG(CLOGGER_ID),"zmq_send() failed: %d", zmq_errno());
+		}
+	}
 
 	return rc;
 }
@@ -1241,7 +1299,6 @@ consume_syscall_event (nvmi_event_t * evt)
 	char buf[1024] = {0};
 	char buf2[512];
 	event_t event = {0};
-	struct timeval ts;
 
 	assert (cbi);
 	assert (cbi->cb_type == NVMI_CALLBACK_SYSCALL);
@@ -1251,18 +1308,9 @@ consume_syscall_event (nvmi_event_t * evt)
 		dump_cb_stats();
 	}
 
+	populate_outbound_event (evt, EVENT_TYPE_SYSCALL, &event);
+
 	snprintf (buf, sizeof(buf), "syscall=%s(", cbi->name);
-
-	// General event data
-	event.len     = htobe32 (sizeof(event));
-	event.type    = htobe32 (EVENT_TYPE_SYSCALL);
-	event.id      = htobe64 (evt->id);
-	event.context = htobe64 (evt->task->pid);
-
-	(void) gettimeofday (&ts, NULL);
-	event.time.sec  = htobe64 (ts.tv_sec);
-	event.time.usec = htobe64 (ts.tv_usec);
-	strncpy (event.comm, evt->task->comm, sizeof(event.comm));
 
 	// Syscall-specific data
 	strncpy (event.u.syscall.name, cbi->name, sizeof(event.u.syscall.name));
@@ -1368,9 +1416,11 @@ consume_syscall_event (nvmi_event_t * evt)
 #endif
 	strncat (buf, buf2, sizeof(buf) - strlen(buf) - 1);
 
-	if (gstate.use_comms) {
+	if (gstate.use_comms)
+	{
 		rc = zmq_send (gstate.zmq_event_socket, &event, sizeof(event), 0);
-		if (rc < 0) {
+		if (rc < 0)
+		{
 			clog_warn (CLOG(CLOGGER_ID),"zmq_send() failed: %d", zmq_errno());
 		}
 	}

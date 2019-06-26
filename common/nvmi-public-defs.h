@@ -79,9 +79,9 @@ enum event_types
 {
 	EVENT_TYPE_NONE           = 0,
 	EVENT_TYPE_SYSCALL        = 1,
-	EVENT_TYPE_PROCESS_CREATE = 2, // process created, or first observed
+	EVENT_TYPE_PROCESS_CREATE = 2, // process created, or first observed (before execve)
 	EVENT_TYPE_PROCESS_DEATH  = 3, // process died (do_exit called)
-	EVENT_TYPE_FILE_CREATION  = 4,
+	EVENT_TYPE_FILE_CREATE    = 4,
 };
 
 typedef uint32_t event_type_t;
@@ -189,9 +189,10 @@ typedef struct _event_t
 	char            comm[PROCESS_MAX_COMM_NAME];
 
 	union {
-		process_death_event_t death;
-		file_creation_event_t newfile;
-		syscall_event_t       syscall;
+		process_creation_event_t pcreate;
+		process_death_event_t    pdeath;
+		file_creation_event_t    fcreate;
+		syscall_event_t          syscall;
 	} u;
 
 } NVMI_STRUCT_ATTRIBS event_t;

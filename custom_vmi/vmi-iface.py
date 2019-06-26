@@ -33,7 +33,9 @@ evt_syscall_arg_fmt = "IIQ"
 # ... and altogether here's the format, followed by a data buffer
 evt_syscall_args = 6 * evt_syscall_arg_fmt
 
-
+evt_file_create_fmt = "I"
+evt_proc_create_fmt = "QQQ32s123s"
+evt_proc_death_fmt  = ""
 
 SYSCALL_EVENT_FLAG_HAS_BUFFER       = 0x0001
 SYSCALL_EVENT_FLAG_BUFFER_TRUNCATED = 0x0002
@@ -42,7 +44,7 @@ EVENT_TYPE_NONE           = 0
 EVENT_TYPE_SYSCALL        = 1
 EVENT_TYPE_PROCESS_CREATE = 2
 EVENT_TYPE_PROCESS_DEATH  = 3
-EVENT_TYPE_FILE_CREATION  = 4
+EVENT_TYPE_FILE_CREATE    = 4
 
 SYSCALL_ARG_TYPE_NONE   = 0
 SYSCALL_ARG_TYPE_SCALAR = 1
@@ -58,12 +60,13 @@ REQUEST_TYPE_SET_EVENT_LIMIT = 2
 
 
 class nvmi_iface:
-    def __init__(self, event_channel, request_channel):
+    def __init__(self, event_channel, request_channel, verbose=False):
         self.echannel = event_channel
         self.rchannel = request_channel
         self.ecount = 0
         self._request_id = 1 # starting request ID
         self.pending_kills = dict() # maps: PID -> request id
+        self._verbose = verbose
 
     def _get_next_request_id(self):
         while 0 == self._request_id:
@@ -76,6 +79,7 @@ class nvmi_iface:
             return data.decode('utf-8', 'replace').rstrip('\0')
         except UnicodeDecodeError as e:
                 print ("Encountered invalid encoding in {}".format(data))
+                ## TODO: remove after testing
                 import pdb;pdb.set_trace()
                 return None
 
@@ -86,19 +90,19 @@ class nvmi_iface:
 
         while True:
             try:
-                (elen, etype, eid, epid, ets_s, ets_us, ecomm) = \
+                (elen, etype, eid, ectx, ets_s, ets_us, ecomm) = \
                     struct.unpack("!" + evt_fmt,
                                   msg[0:struct.calcsize(evt_fmt)])
 
                 rval['type']  = {EVENT_TYPE_SYSCALL        : "syscall",
                                  EVENT_TYPE_PROCESS_CREATE : "proc_create",
                                  EVENT_TYPE_PROCESS_DEATH  : "proc_death",
-                                 EVENT_TYPE_FILE_CREATION  : "file_create"} [etype]
+                                 EVENT_TYPE_FILE_CREATE    : "file_create"} [etype]
 
                 rval['id']    = eid
                 rval['time']  = ets_s + 1.0 * ets_us / 1000000.
-                rval['pid']   = epid
-                rval['pname'] = ecomm.decode().rstrip('\0')
+                rval['ctx']   = ectx
+                rval['pname'] = self._decode_str_bytes(ecomm)
 
                 ofs += struct.calcsize(evt_fmt)
 
@@ -124,9 +128,27 @@ class nvmi_iface:
 
                     rval['args'] = args
 
+                elif EVENT_TYPE_FILE_CREATE == etype:
+                    (fd,) = struct.unpack ("!" + evt_file_create_fmt,
+                                           msg[ofs:ofs + struct.calcsize(evt_file_create_fmt)])
+                    rval['fd'] = fd
+
+                elif EVENT_TYPE_PROCESS_CREATE == etype:
+                    (uid, gid, pid, comm, path) = \
+                        struct.unpack ("!" + evt_proc_create_fmt,
+                                       msg[ofs:ofs + struct.calcsize(evt_proc_create_fmt)])
+                    rval['uid'] = uid
+                    rval['gid'] = gid
+                    rval['pid'] = pid
+                    rval['comm'] = self._decode_str_bytes(comm)
+                    rval['path'] = self._decode_str_bytes(path)
+
+                # EVENT_TYPE_PROCESS_DEATH carries no additional data
+
                 self.ecount += 1
 
-                print (rval)
+                if self._verbose:
+                    print (rval)
 
                 # store the original message so caller can send it elsewhere if needed
                 rval['raw'] = msg
@@ -135,6 +157,20 @@ class nvmi_iface:
             except Exception as  e:
                 import pdb;pdb.set_trace()
                 print ("Encountered exception {}".format(e))
+
+
+    # Good for messages to stdout, not good for internal usage. JSON might be better for that.
+    @staticmethod
+    def event_fmt (evt):
+        predefined = ('id', 'type', 'time', 'ctx')
+        
+        s = '{ ' + ", ".join ( "\"{}\" : {}".format(p, repr(evt[p])) for p in predefined )
+        if len(evt) > len(predefined):
+            s += ', '
+            s += ", ".join ( [ "\"{}\" : {}".format(p, repr(evt[p])) for p in evt if p not in predefined + ('raw',) ] )
+        s += ' }'
+
+        return s
 
 
     def request_proc_kill (self, target_pid):
@@ -187,10 +223,10 @@ if __name__ == '__main__':
 
     while True:
         evt = nvmi.get_event()
-        print ([evt[k] for k in evt if k is not 'raw'])
+        print (nvmi_iface.event_fmt(evt))
 
         pname = evt['pname']
-        pid   = evt['pid']
+        pid   = evt['ctx']
 
         syscall_ct[pid] = syscall_ct.get(pid,0) + 1
 
