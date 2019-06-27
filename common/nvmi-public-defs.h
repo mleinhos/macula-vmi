@@ -205,7 +205,7 @@ enum request_codes
 	REQUEST_CMD_NONE = 0,
 	REQUEST_CMD_PROCKILL = 1,
 	REQUEST_CMD_SET_EVENT_LIMIT = 2,
-	REQUEST_CMD_GET_PROC_CONTEXT = 3;
+	REQUEST_CMD_GET_PROC_CONTEXT = 3,
 };
 typedef uint32_t request_code_t;
 
