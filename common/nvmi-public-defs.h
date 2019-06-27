@@ -97,6 +97,7 @@ typedef struct _process_creation_event
 	uint64_t pid;
 	char     comm[PROCESS_MAX_COMM_NAME];
 	char     path[PROCESS_MAX_PATH];
+	char     pwd[PROCESS_MAX_PATH];
 } NVMI_STRUCT_ATTRIBS process_creation_event_t;
 
 
@@ -204,6 +205,7 @@ enum request_codes
 	REQUEST_CMD_NONE = 0,
 	REQUEST_CMD_PROCKILL = 1,
 	REQUEST_CMD_SET_EVENT_LIMIT = 2,
+	REQUEST_CMD_GET_PROC_CONTEXT = 3;
 };
 typedef uint32_t request_code_t;
 
@@ -218,6 +220,7 @@ typedef struct _request_t
 
 
 // Response to request: id fields match
+// TODO: expand to enable info queries, e.g. GET_PROC_CONTEXT
 typedef struct _response
 {
 	uint64_t id;

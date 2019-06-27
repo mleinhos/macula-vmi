@@ -692,6 +692,8 @@ read_user_mem (vmi_instance_t vmi,
 		vmi_v2pcache_flush (vmi, ~0);
 #endif
 		vmi_pidcache_flush (vmi);
+		vmi_rvacache_flush (vmi);
+		// Try #2
 		str = vmi_read_str_va (vmi, va, evt->task->pid);
 		if (NULL == str)
 		{
@@ -746,9 +748,10 @@ read_user_mem (vmi_instance_t vmi,
 */
 
 	status = vmi_read (vmi, &ctx, sizeof(buf), buf, &sz);
-	if (VMI_FAILURE == status) {
+	if (VMI_FAILURE == status)
+	{
 		rc = EIO;
-		clog_warn (CLOG(CLOGGER_ID),"Error could read memory from VA %" PRIx64 ".", va);
+		clog_warn (CLOG(CLOGGER_ID), "Error could read memory from VA %" PRIx64 ".", va);
 
 		snprintf (buf, sizeof(buf), "*0x%" PRIx64, va);
 		str = strdup (buf);

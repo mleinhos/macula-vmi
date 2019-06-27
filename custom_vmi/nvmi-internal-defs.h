@@ -78,7 +78,10 @@ typedef struct _nvmi_task_info
 } nvmi_task_info_t;
 
 
-// TODO: expand for other event types
+/**
+ * A captured event; geared toward syscalls but suitable for other
+ * kernel hook points.
+ */
 typedef struct _nvmi_event
 {
 	atomic_t         id;
@@ -96,7 +99,7 @@ typedef struct _nvmi_event
 	int mem_ofs[NVMI_MAX_SYSCALL_ARG_CT];
 	int arg_lens[NVMI_MAX_SYSCALL_ARG_CT];
 
-	// ...and put it here
+	// Copy of pertinent process memory
 	uint8_t mem[NVMI_MAX_ARG_MEM];
 } nvmi_event_t;
 
