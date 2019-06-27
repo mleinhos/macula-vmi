@@ -75,11 +75,11 @@ static nvmi_cb_info_t
 nvmi_special_cbs[] =
 {
 #define NVMI_DO_EXIT_IDX 0
-	{ .cb_type = NVMI_CALLBACK_SPECIAL, .name = "do_exit", .argct = 0 },
+	{ .cb_type = NVMI_CALLBACK_SPECIAL, .name = "do_exit", .state = {.inv_cache = 1}, .argct = 0 },
 #define NVMI_FD_INSTALL_IDX 1
 	{ .cb_type = NVMI_CALLBACK_SPECIAL, .name = "fd_install", .argct = 6 },
 #define NVMI_DO_FORK_IDX 2
-	{ .cb_type = NVMI_CALLBACK_SPECIAL, .name = "_do_fork" },
+	{ .cb_type = NVMI_CALLBACK_SPECIAL, .name = "_do_fork", .state = {.inv_cache = 1}, },
 };
 
 
@@ -671,6 +671,7 @@ read_user_mem (vmi_instance_t vmi,
 	addr_t dtb = 0;
 	char buf[16] = {0};
 	size_t sz = 0;
+	int retry = 0;
 
 #if defined(X86_64) || defined(EXPERIMENTAL_READ_USERMEM)
 	// Actually try to pull the contents out of user memory
@@ -683,11 +684,22 @@ read_user_mem (vmi_instance_t vmi,
 	// dtb and writing contents directly into caller-supplied
 	// buffer.
 	str = vmi_read_str_va (vmi, va, evt->task->pid);
-	if (NULL == str) {
-		clog_error (CLOG(CLOGGER_ID),
-			    "Error: could not read string at %" PRIx64 " in PID %d",
-			    va, evt->task->pid);
-		goto failsafe;
+	if (NULL == str)
+	{
+#if defined(X86_64) || defined(EXPERIMENTAL_ARM_FEATURES)
+		vmi_v2pcache_flush (vmi, evt->task->task_dtb);
+#else
+		vmi_v2pcache_flush (vmi, ~0);
+#endif
+		vmi_pidcache_flush (vmi);
+		str = vmi_read_str_va (vmi, va, evt->task->pid);
+		if (NULL == str)
+		{
+			clog_error (CLOG(CLOGGER_ID),
+				    "Error: could not read string at %" PRIx64 " in PID %d",
+				    va, evt->task->pid);
+			goto failsafe;
+		}
 	}
 
 	// Success, done
@@ -875,8 +887,9 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 	status_t status = VMI_SUCCESS;
 	nvmi_cb_info_t * cbi = (nvmi_cb_info_t *) arg;
 	nvmi_event_t * evt = NULL;
-	static bool size_warning = false;
 	int dataofs = 0;
+	static nvmi_task_info_t * prev_ctx = NULL;
+	static bool size_warning = false;
 
 	assert (cbi);
 
@@ -912,7 +925,7 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 
 			evt->mem_ofs[i] = dataofs;
 			evt->arg_lens[i] = MIN(sizeof(evt->mem) - dataofs, strlen(buf));
-			strncpy (evt->mem, buf, evt->arg_lens[i]);
+			strncpy (&evt->mem[dataofs], buf, evt->arg_lens[i]);
 			free (buf);
 			dataofs += evt->arg_lens[i];
 			break;
@@ -976,6 +989,17 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 	evt->id = atomic_inc (&gstate.event_id);
 	g_async_queue_push (gstate.event_queue, (gpointer) evt);
 
+/*
+	// FIXME: determine when this really needs to be done
+
+	//if (cbi->state.inv_cache)
+	if (evt->task != prev_ctx)
+	{
+		prev_ctx = evt->task;
+		//vmi_v2pcache_flush (vmi, ~0);
+		vmi_pidcache_flush (vmi);
+	}
+*/
 exit:
 	return;
 }
@@ -1010,7 +1034,6 @@ instrument_special_point (const char *name, addr_t kva)
 	}
 
 exit:
-
 	return rc;
 }
 
@@ -1299,6 +1322,7 @@ consume_syscall_event (nvmi_event_t * evt)
 	char buf[1024] = {0};
 	char buf2[512];
 	event_t event = {0};
+	int dataofs = 0;
 
 	assert (cbi);
 	assert (cbi->cb_type == NVMI_CALLBACK_SYSCALL);
@@ -1321,21 +1345,29 @@ consume_syscall_event (nvmi_event_t * evt)
 
 		switch (cbi->args[i].type) {
 		case NVMI_ARG_TYPE_STR: { // char *
-			size_t len = 0;
-			const char * str = (const char *) &(evt->mem[ evt->mem_ofs[i]]);
-			len = strlen(str);
+			uint8_t * bytes = &(evt->mem[ evt->mem_ofs[i] ]);
+			size_t len = MIN (evt->arg_lens[i], sizeof(event.u.syscall.data) - dataofs);
+			assert (len >= 0);
 
 			event.u.syscall.args[i].type = htobe32 (SYSCALL_ARG_TYPE_STR);
-			event.u.syscall.args[i].len  = htobe32 (MIN (len+1, sizeof(event.u.syscall.data)));
-			event.u.syscall.args[i].val.offset = htobe32 (0);
-			if (len > 0) {
-				snprintf (buf2, sizeof(buf2) - 1, " \"%s\",", str);
-				strncat (buf, buf2, sizeof(buf) - strlen(buf) - 1);
-				strncpy (&event.u.syscall.data[0], str, sizeof(event.u.syscall.data)-1);
-				if (len >= sizeof(event.u.syscall.data)) {
-					event.u.syscall.flags |= SYSCALL_EVENT_FLAG_BUFFER_TRUNCATED;
-				}
+			event.u.syscall.args[i].len  = htobe32 (len);
+			event.u.syscall.args[i].val.offset = htobe64 (dataofs);
+
+			if (len > 0)
+			{
 				event.u.syscall.flags |= SYSCALL_EVENT_FLAG_HAS_BUFFER;
+
+				memcpy (&event.u.syscall.data[dataofs], bytes, len);
+
+				snprintf (buf2, sizeof(buf2) - 1, " \"%s\",", (const char *)&event.u.syscall.data[dataofs]);
+				strncat (buf, buf2, sizeof(buf) - strlen(buf) - 1);
+
+				if (dataofs + len >= sizeof(event.u.syscall.data))
+				{
+					event.u.syscall.flags |= SYSCALL_EVENT_FLAG_BUFFER_TRUNCATED;
+					break;
+				}
+				dataofs += len;
 			}
 			break;
 		}

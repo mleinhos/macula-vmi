@@ -36,6 +36,12 @@
 #    define MAX(x,y) ((x) < (y) ? (x) : (y))
 #endif
 
+#if defined(X86_64)
+#    define COMMON_BREAKPOINT() asm("int $3;")
+#elif defined(ARM64)
+#    define COMMON_BREAKPOINT() __builtin_trap()
+#endif
+
 
 typedef unsigned long atomic_t;
 

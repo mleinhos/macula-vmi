@@ -72,7 +72,7 @@ typedef struct _nvmi_cb_info
 		unsigned long derefs    : 1; // dereferences guest memory
 		unsigned long sticky    : 1; // cannot be disabled
 		unsigned long reset_ctx : 1; // triggers reset in process context, e.g. sys_exec* family
-
+		unsigned long inv_cache : 1; // invalidates VMI cache pertaining to process
 		// mutable state
 		unsigned long enabled   : 1; // is currently enabled
 	} state;
@@ -111,7 +111,7 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 	  .args = { { .type = NVMI_ARG_TYPE_STR } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_unlinkat", .argct = 1,
+	  .name = "sys_unlinkat", .argct = 3,
 	  .state = { .derefs = 1, .enabled = 1},
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_STR },
@@ -377,7 +377,7 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
 	  .name = "sys_clone", .argct = 5,
-	  .state = { .enabled = 1, },
+	  .state = { .enabled = 1, .inv_cache = 1 },
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR }, // flags
 		    { .type = NVMI_ARG_TYPE_PVOID }, // *child_stack
 		    { .type = NVMI_ARG_TYPE_PVOID }, // *ptid
@@ -405,12 +405,12 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
 	  .name = "sys_exit", .argct = 1,
-	  .state = { .enabled = 1, },
+	  .state = { .enabled = 1, .inv_cache = 1 },
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR } } }, 
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
 	  .name = "sys_fork", .argct = 0,
-	  .state = { .enabled = 1, } },
+	  .state = { .enabled = 1, .inv_cache = 1 } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
 	  .name = "sys_seccomp", .argct = 3,

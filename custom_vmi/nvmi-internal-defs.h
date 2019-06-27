@@ -47,7 +47,11 @@ static int nvmi_syscall_arg_regs[] = { RDI, RSI, RDX, R10, R8, R9 };
 
 /**
  * Here's all the data we collect on a process context. We also track
- * our interaction with the process here.
+ * our interaction with the process here. Other items of interest
+ * in process context could include:
+ *
+ * - PWD
+ * - security context / capabilities
  */
 typedef struct _nvmi_task_info
 {

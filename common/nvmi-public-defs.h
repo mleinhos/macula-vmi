@@ -29,16 +29,15 @@
 #define NVMI_STRUCT_ATTRIBS __attribute__((packed))
 
 
-typedef uint32_t length_t;
-typedef uint32_t offset_t;
+//typedef uint32_t length_t;
 
 // Our file descriptor: reduced in size for typical case
 typedef uint32_t nvmi_fd_t;
 
 
 // These indicate there's no data to point to
-#define INVALID_LENGTH ((length_t)-1)
-#define INVALID_OFFSET ((length_t)-1)
+//#define INVALID_LENGTH ((length_t)-1)
+//#define INVALID_OFFSET ((length_t)-1)
 #define INVALID_FILE_DESCRIPTOR ((nvmi_fd_t)-1)
 
 // Process ID: guaranteed unique during process lifetime. Once a
@@ -141,14 +140,14 @@ typedef uint32_t syscall_arg_type_t;
 
 typedef struct _syscall_arg_t {
 	syscall_arg_type_t type;
-	length_t           len; // Valid only in case of complex data type
+	uint32_t           len; // Valid only in case of complex data type
 
 	union
 	{
 		uint64_t  long_val;
 
 		// In case of a complex type, its offset in the data buffer is here
-		offset_t offset;
+		uint64_t offset;
 	} val;
 } NVMI_STRUCT_ATTRIBS syscall_arg_t;
 

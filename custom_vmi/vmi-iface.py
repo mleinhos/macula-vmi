@@ -117,14 +117,14 @@ class nvmi_iface:
 
                     args = list()
                     for i in range(eargct):
-                        (atype, alen, aval) = struct.unpack("!" + evt_syscall_arg_fmt,
+                        (atype, alen, aofs) = struct.unpack("!" + evt_syscall_arg_fmt,
                                                             msg[ofs:ofs+struct.calcsize(evt_syscall_arg_fmt)])
                         ofs += struct.calcsize(evt_syscall_arg_fmt)
 
                         if atype in (SYSCALL_ARG_TYPE_STR, SYSCALL_ARG_TYPE_WSTR):
-                            args.append(self._decode_str_bytes(data[aval: aval + alen]))
+                            args.append(self._decode_str_bytes(data[aofs: aofs + alen]))
                         else:
-                            args.append(aval)
+                            args.append(aofs)
 
                     rval['args'] = args
 
