@@ -256,10 +256,10 @@ cb_gather_registers (vmi_instance_t vmi,
 
 /*
 #if defined(ARM64)
-	status  = vmi_get_vcpureg (vmi, &regs->arch.arm64.ttbr0,  TTBR0,  event->vcpu_id);
-	status |= vmi_get_vcpureg (vmi, &regs->arch.arm64.ttbr1,  TTBR1,  event->vcpu_id);
-	status |= vmi_get_vcpureg (vmi, &regs->arch.arm64.sp,     SP_USR, event->vcpu_id);
-	status |= vmi_get_vcpureg (vmi, &regs->arch.arm64.sp_el0, SP_EL0, event->vcpu_id);
+	status  = vmi_get_vcpureg (vmi, &regs->arm.r.ttbr0,  TTBR0,  event->vcpu_id);
+	status |= vmi_get_vcpureg (vmi, &regs->arm.r.ttbr1,  TTBR1,  event->vcpu_id);
+	status |= vmi_get_vcpureg (vmi, &regs->arm.r.sp,     SP_USR, event->vcpu_id);
+	status |= vmi_get_vcpureg (vmi, &regs->arm.r.sp_el0, SP_EL0, event->vcpu_id);
 
 	for (int i = 0; i < NUMBER_OF(x); ++i) {
 		(void) vmi_get_vcpureg (vmi, &x[i], R0+i, event->vcpu_id);
@@ -271,15 +271,15 @@ cb_gather_registers (vmi_instance_t vmi,
 	clog_debug (CLOG(CLOGGER_ID), "Event: ttbcr = 0x%lx", event->arm_regs->ttbcr);
 	clog_debug (CLOG(CLOGGER_ID), "Event: cpsr  = 0x%lx", event->arm_regs->cpsr);
 
-	clog_debug (CLOG(CLOGGER_ID), "context: ttbr0   = %lx", regs->arch.arm64.ttbr0);
-	clog_debug (CLOG(CLOGGER_ID), "context: ttbr1   = %lx", regs->arch.arm64.ttbr1);
-	clog_debug (CLOG(CLOGGER_ID), "context: sp_el0  = %lx", regs->arch.arm64.sp_el0);
-	clog_debug (CLOG(CLOGGER_ID), "context: sp      = %lx", regs->arch.arm64.sp);
+	clog_debug (CLOG(CLOGGER_ID), "context: ttbr0   = %lx", regs->arm.r.ttbr0);
+	clog_debug (CLOG(CLOGGER_ID), "context: ttbr1   = %lx", regs->arm.r.ttbr1);
+	clog_debug (CLOG(CLOGGER_ID), "context: sp_el0  = %lx", regs->arm.r.sp_el0);
+	clog_debug (CLOG(CLOGGER_ID), "context: sp      = %lx", regs->arm.r.sp);
 
 #else
-	status  = vmi_get_vcpureg (vmi, &regs->arch.intel.cr3,     CR3,     event->vcpu_id);
-	status |= vmi_get_vcpureg (vmi, &regs->arch.intel.sp,      RSP,     event->vcpu_id);
-	status |= vmi_get_vcpureg (vmi, &regs->arch.intel.gs_base, GS_BASE, event->vcpu_id);
+	status  = vmi_get_vcpureg (vmi, &regs->intel.cr3,     CR3,     event->vcpu_id);
+	status |= vmi_get_vcpureg (vmi, &regs->intel.sp,      RSP,     event->vcpu_id);
+	status |= vmi_get_vcpureg (vmi, &regs->intel.gs_base, GS_BASE, event->vcpu_id);
 #endif
 	if (VMI_SUCCESS != status) {
 		rc = EFAULT;
@@ -686,8 +686,10 @@ read_user_mem (vmi_instance_t vmi,
 	str = vmi_read_str_va (vmi, va, evt->task->pid);
 	if (NULL == str)
 	{
+		// Maybe inject #PF too?
 #if defined(X86_64) || defined(EXPERIMENTAL_ARM_FEATURES)
-		vmi_v2pcache_flush (vmi, evt->task->task_dtb);
+//		vmi_v2pcache_flush (vmi, evt->task->task_dtb);
+		vmi_v2pcache_flush (vmi, ~0);
 #else
 		vmi_v2pcache_flush (vmi, ~0);
 #endif
@@ -733,7 +735,7 @@ read_user_mem (vmi_instance_t vmi,
 
 	access_context_t ctx = { .translate_mechanism = VMI_TM_PROCESS_DTB,
 				 .dtb = dtb,
-				 // .dtb = evt->r.arch.arm64.ttbr0,
+				 // .dtb = evt->r.arm.r.ttbr0,
 				 .addr = va };
 	// better to read directly into caller buffer
 
@@ -812,8 +814,10 @@ read_user_mem (vmi_instance_t vmi,
 
 failsafe:
 	// An attempt to relay something to the caller
-	snprintf (buf, sizeof(buf), "*0x%" PRIx64, va);
-	str = strdup (buf);
+
+	//snprintf (buf, sizeof(buf), "*0x%" PRIx64, va);
+	//str = strdup (buf);
+	str = strdup ("[unknown]");
 
 exit:
 	return str;
@@ -1241,6 +1245,7 @@ consume_special_event (nvmi_event_t * evt)
 	nvmi_cb_info_t * cbi = evt->cbi;
 	event_t event = {0};
 	bool event_ready = true;
+	size_t size = offsetof(event_t, u);
 
 	assert (cbi);
 	assert (cbi->cb_type == NVMI_CALLBACK_SPECIAL);
@@ -1260,6 +1265,7 @@ consume_special_event (nvmi_event_t * evt)
 		event.u.pcreate.pid = htobe64 (evt->task->pid);
 		strncpy (event.u.pcreate.comm, evt->task->comm, sizeof(event.u.pcreate.comm));
 
+		size += sizeof(process_death_event_t);
 		event_ready = true;
 
 		// Did brain ask for this destruction?
@@ -1288,10 +1294,10 @@ consume_special_event (nvmi_event_t * evt)
 	else if (cbi == &nvmi_special_cbs[NVMI_FD_INSTALL_IDX])
 	{
 		populate_outbound_event (evt, EVENT_TYPE_FILE_CREATE, &event);
+		size += sizeof(file_creation_event_t);
 
-//		asm("int $3;");
 #if defined(ARM64)
-		event.u.fcreate.file_no = htobe32 (evt->r.arm.x0);
+		event.u.fcreate.file_no = htobe32 (evt->r.syscall_args[0]);
 #else
 		event.u.fcreate.file_no = htobe32 (evt->r.x86.r.rdi);
 #endif
@@ -1299,6 +1305,7 @@ consume_special_event (nvmi_event_t * evt)
 	else if (cbi == &nvmi_special_cbs[NVMI_DO_FORK_IDX])
 	{
 		populate_outbound_event (evt, EVENT_TYPE_PROCESS_CREATE, &event);
+		size += sizeof(process_creation_event_t);
 	}
 	else
 	{
@@ -1307,7 +1314,8 @@ consume_special_event (nvmi_event_t * evt)
 	
 	if (gstate.use_comms && event_ready)
 	{
-		rc = zmq_send (gstate.zmq_event_socket, &event, sizeof(event), 0);
+		event.len = htobe32 (size);
+		rc = zmq_send (gstate.zmq_event_socket, &event, size, 0);
 		if (rc < 0) {
 			clog_warn (CLOG(CLOGGER_ID),"zmq_send() failed: %d", zmq_errno());
 		}
@@ -1326,6 +1334,7 @@ consume_syscall_event (nvmi_event_t * evt)
 	char buf2[512];
 	event_t event = {0};
 	int dataofs = 0;
+	size_t size = offsetof(event_t, u.syscall.data);
 
 	assert (cbi);
 	assert (cbi->cb_type == NVMI_CALLBACK_SYSCALL);
@@ -1453,7 +1462,9 @@ consume_syscall_event (nvmi_event_t * evt)
 
 	if (gstate.use_comms)
 	{
-		rc = zmq_send (gstate.zmq_event_socket, &event, sizeof(event), 0);
+		size += dataofs;
+		event.len = htobe32 (size);
+		rc = zmq_send (gstate.zmq_event_socket, &event, size, 0);
 		if (rc < 0)
 		{
 			clog_warn (CLOG(CLOGGER_ID),"zmq_send() failed: %d", zmq_errno());
@@ -1466,7 +1477,7 @@ consume_syscall_event (nvmi_event_t * evt)
 	if (cbi->state.reset_ctx)
 	{
 		clog_info (CLOG(CLOGGER_ID), "Invalidating context of task pid=%d", evt->task->pid);
-
+		
 		g_rw_lock_writer_lock (&gstate.context_lock);
 		g_hash_table_remove (gstate.context_lookup, (gpointer) evt->task->key);
 		g_rw_lock_writer_unlock (&gstate.context_lock);

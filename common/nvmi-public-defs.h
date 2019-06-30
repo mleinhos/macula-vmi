@@ -145,9 +145,9 @@ typedef struct _syscall_arg_t {
 
 	union
 	{
+		// Simple (scalar) type
 		uint64_t  long_val;
-
-		// In case of a complex type, its offset in the data buffer is here
+		// Complex type: offset in data field
 		uint64_t offset;
 	} val;
 } NVMI_STRUCT_ATTRIBS syscall_arg_t;
