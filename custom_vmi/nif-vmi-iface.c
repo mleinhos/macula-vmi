@@ -290,13 +290,15 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 		// Go back to "normal" view
 		event->slat_id = get_requested_view (true);
 
-		// Grab the hook node used to get us here to the secondary (SS) view
+		// Grab the hook node used to get us here to the
+		// secondary (SS) view. The rlock may have failed
+		// earlier; if so, don't invoke CB.
 		hook_node = xa.vcpu_hook_nodes [event->vcpu_id];
-		assert (NULL != hook_node && true == hook_node->rlocked);
+		assert (NULL != hook_node);
 
 		if (NULL != hook_node)
 		{
-			if (hook_node->post_cb)
+			if (hook_node->post_cb && hook_node->rlocked)
 			{
 				hook_node->post_cb (vmi, NULL, hook_node->cb_arg);
 			}
@@ -345,7 +347,7 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 	// not exist (avoid loop)
 	event->slat_id = get_requested_view (false);
 
-	// We found the hook node. Lock it or bail out.
+	// We found the hook node. Lock it or bail out. Even if locking fails, the SS view is still used!
 	hook_node->rlocked = g_rw_lock_reader_trylock (&hook_node->lock);
 	if (!hook_node->rlocked)
 	{
@@ -646,7 +648,7 @@ nif_enable_monitor (addr_t kva,
 #if defined(ARM64)
 	else
 	{
-		shadow_frame_ss	= shadow_frame + 1;
+		shadow_frame_ss	= shadow_frame + 1; // must be valid below...
 	}
 #endif
 	// shadow_frame is now known
