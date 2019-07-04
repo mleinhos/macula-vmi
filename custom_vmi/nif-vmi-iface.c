@@ -627,11 +627,11 @@ nif_enable_monitor (addr_t kva,
 		if (rc < 0)
 		{
 			rc = ENOMEM;
-			clog_error (CLOG(CLOGGER_ID), "Failed to allocate frame at %" PRIx64 "", shadow_frame);
+			clog_error (CLOG(CLOGGER_ID), "Failed to allocate frame at %" PRIx64 "", shadow_frame_ss);
 			goto exit;
 		}
 
-		rc = xc_altp2m_change_gfn (xa.xci, xa.domain_id, xa.ss_view, orig_frame, shadow_frame);
+		rc = xc_altp2m_change_gfn (xa.xci, xa.domain_id, xa.ss_view, orig_frame, shadow_frame_ss);
 		if (rc)
 		{
 			rc = EACCES;
@@ -651,7 +651,7 @@ nif_enable_monitor (addr_t kva,
 	if (NULL == pgnode)
 	{
 		// Copy orig frame into shadow
-		status = vmi_read_pa(xa.vmi, MKADDR(orig_frame, 0), DOM_PAGE_SIZE, buff, &ret);
+		status = vmi_read_pa (xa.vmi, MKADDR(orig_frame, 0), DOM_PAGE_SIZE, buff, &ret);
 		if (DOM_PAGE_SIZE != ret || status == VMI_FAILURE)
 		{
 			rc = EACCES;
@@ -659,7 +659,7 @@ nif_enable_monitor (addr_t kva,
 			goto exit;
 		}
 
-		status = vmi_write_pa(xa.vmi, MKADDR(shadow_frame, 0), DOM_PAGE_SIZE, buff, &ret);
+		status = vmi_write_pa (xa.vmi, MKADDR(shadow_frame, 0), DOM_PAGE_SIZE, buff, &ret);
 		if (DOM_PAGE_SIZE != ret || status == VMI_FAILURE)
 		{
 			rc = EACCES;
@@ -669,7 +669,7 @@ nif_enable_monitor (addr_t kva,
 
 #if defined(ARM64)
 		// Copy orig into shadow SS
-		status = vmi_write_pa(xa.vmi, MKADDR(shadow_frame_ss, 0), DOM_PAGE_SIZE, buff, &ret);
+		status = vmi_write_pa (xa.vmi, MKADDR(shadow_frame_ss, 0), DOM_PAGE_SIZE, buff, &ret);
 		if (DOM_PAGE_SIZE != ret || status == VMI_FAILURE)
 		{
 			rc = EACCES;
@@ -712,7 +712,7 @@ nif_enable_monitor (addr_t kva,
 	status  = write_trap_val_pa (xa.vmi, MKADDR(shadow_frame, offset), TRAP_CODE);
 #if defined(ARM64)
 	clog_debug (CLOG(CLOGGER_ID), "ARM: Writing SS trap %x to PA %" PRIx64 ", backup2=%x",
-		    TRAP_CODE, MKADDR(shadow_frame_ss, offset) + 1, orig2);
+		    TRAP_CODE, MKADDR(shadow_frame_ss, offset) + 4, orig2);
 	status |= write_trap_val_pa (xa.vmi, MKADDR(shadow_frame_ss, offset) + 4, TRAP_CODE);
 #endif
 	if (VMI_SUCCESS != status)
@@ -727,14 +727,14 @@ nif_enable_monitor (addr_t kva,
 	// written into shadow_frame.  FIXME:
 	if (is_trigger)
 	{
-		clog_info (CLOG(CLOGGER_ID), "Trap %s put in trigger view", name);
+		clog_info (CLOG(CLOGGER_ID), "Writing trap %s into trigger view", name);
 
 		// Update p2m mapping: trigger_view: frame --> shadow_frame
 		rc = xc_altp2m_change_gfn (xa.xci, xa.domain_id, xa.trigger_view, orig_frame, shadow_frame);
 		if (rc)
 		{
 			rc = EACCES;
-			clog_error (CLOG(CLOGGER_ID), "Shadow: Unable to change mapping for active_view");
+			clog_error (CLOG(CLOGGER_ID), "Shadow: Unable to change mapping for trigger_view");
 			goto exit;
 		}
 	}
