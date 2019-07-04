@@ -73,6 +73,9 @@ typedef struct _nvmi_cb_info
 		unsigned long sticky    : 1; // cannot be disabled
 		unsigned long reset_ctx : 1; // triggers reset in process context, e.g. sys_exec* family
 		unsigned long inv_cache : 1; // invalidates VMI cache pertaining to process
+		unsigned long trigger   : 1; // include this instr point in the trigger view too
+		unsigned long trigger_off: 1; // this point deactives the given process' trigger
+
 		// mutable state
 		unsigned long enabled   : 1; // is currently enabled
 	} state;
@@ -261,6 +264,14 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 	//
 	// Network stuff
 	//
+
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_socket", .argct = 3,
+	  .state = { .derefs = 0, .enabled = 1, .trigger = 1},
+	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
+		    { .type = NVMI_ARG_TYPE_SCALAR } ,
+		    { .type = NVMI_ARG_TYPE_SCALAR } } },
+
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
 	  .name = "sys_bind", .argct = 3,
 	  .state = { .derefs = 1, .enabled = 1},
@@ -268,9 +279,11 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 		    { .type = NVMI_ARG_TYPE_SA     } ,
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
+	// TODO: accept()
+
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
 	  .name = "sys_connect", .argct = 3,
-	  .state = { .derefs = 1, .enabled = 1},
+	  .state = { .derefs = 1, .enabled = 1, .trigger = 1},
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_SA     } ,
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
@@ -353,7 +366,7 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 	//
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
 	  .name = "sys_execve", .argct = 3,
-	  .state = { .derefs = 1, .enabled = 1, .reset_ctx = 1},
+	  .state = { .derefs = 1, .enabled = 1, .reset_ctx = 1, .trigger = 1},
 	  .args = { { .type = NVMI_ARG_TYPE_STR },       // filename
 		    { .type = NVMI_ARG_TYPE_PVOID } ,    // char * argv[]
 		    { .type = NVMI_ARG_TYPE_PVOID } } }, // char * envp[]
@@ -377,7 +390,7 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
 	  .name = "sys_clone", .argct = 5,
-	  .state = { .enabled = 1, .inv_cache = 1 },
+	  .state = { .enabled = 1, .inv_cache = 1, .trigger = 1 },
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR }, // flags
 		    { .type = NVMI_ARG_TYPE_PVOID }, // *child_stack
 		    { .type = NVMI_ARG_TYPE_PVOID }, // *ptid

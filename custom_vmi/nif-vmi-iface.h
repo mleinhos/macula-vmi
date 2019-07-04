@@ -28,6 +28,17 @@
  */
 typedef void (*nif_event_callback_t) (vmi_instance_t vmi, vmi_event_t* event, void* arg);
 
+
+typedef enum monitor_levels
+{
+	NVMI_MONITOR_LEVEL_UNSET,
+	NVMI_MONITOR_LEVEL_TRIGGERS,
+	NVMI_MONITOR_LEVEL_ACTIVE,
+	NVMI_MONITOR_LEVEL_PARANOID,
+} nvmi_level_t;
+
+
+
 /**
  * Functions return 0 on success, otherwise a positive errno.
  */
@@ -59,14 +70,19 @@ nif_is_monitored(addr_t kva, bool * monitored);
 
 int
 nif_enable_monitor (addr_t kva,
-                    const char* name,
-                    nif_event_callback_t pre_cb,
-                    nif_event_callback_t post_cb,
-                    void* cb_arg);
+		    const char* name,
+		    nif_event_callback_t pre_cb,
+		    nif_event_callback_t post_cb,
+		    void* cb_arg,
+		    bool is_trigger);
 
 
 int
 nif_disable_monitor (addr_t kva);
+
+
+int
+nif_set_level (nvmi_level_t level);
 
 
 #endif // NIF_VMI_H

@@ -42,53 +42,87 @@
 
 typedef uint16_t p2m_view_t;
 #define ALTP2M_INVALID_VIEW (p2m_view_t)(~0)
+#define ALTP2M_DEFAULT_VIEW (p2m_view_t)(0)
+
+#define ALTP2M_DEFAULT_GFN ~(0UL)
+
 
 #if defined(ARM64)
 
 typedef uint32_t trap_val_t;
-static trap_val_t trap =  0xD4000003; // ARM SMC
+//static trap_val_t trap =  0xD4000003; // ARM SMC
+
+#define TRAP_CODE 0xd4000003
 
 #else
 
 static vmi_event_t ss_event[MAX_VCPUS];
 typedef uint8_t trap_val_t;
-static trap_val_t trap = 0xcc; // Intel #DB
+//static trap_val_t trap = 0xcc; // Intel #DB
+
+#define TRAP_CODE 0xcc
 
 #endif
 
 static int act_calls = 0;
-static volatile bool interrupted = false;
 static GThread * event_loop_thread = NULL;
 
-static p2m_view_t alt_view1 = ALTP2M_INVALID_VIEW;
+struct _nif_hook_node;
 
-// Track Xen-wide state
-typedef struct {
+// Track global state
+typedef struct
+{
 	libxl_ctx* xcx;
 	xc_interface* xci;
 	uint32_t domain_id;
 	vmi_instance_t vmi;
+
+//	nvmi_level_t curr_level;
+	nvmi_level_t requested_level;
+
+	// View where just a few pivital points are instrumented. For
+	// now it is the default view. FIXME:
+	p2m_view_t trigger_view;
+
+	// View where all activated syscalls and instr points are trapped
+	p2m_view_t active_view;
+
+//#if defined(ARM64)
+	// View where instructions after every possibly-instrumented
+	// syscall and instr points are trapped. TODO: SS view needs
+	// to include SMC at __schedule, so context switches are
+	// caught and NInspector always stays in sync with the process
+	// context. Failure to do this could result in two SS SMCs
+	// being hit in a row, which we won't recover from.
+	p2m_view_t   ss_view;
+//#endif
 
 	addr_t kdtb;
 
 	uint64_t orig_mem_size;
 	xen_pfn_t max_gpfn;
 
+	// Track the most recent hook node for each vCPU
+        struct _nif_hook_node* vcpu_hook_nodes[MAX_VCPUS];
+
 	GHashTable* pframe_sframe_mappings; //key:pframe
 
 	GHashTable* shadow_pnode_mappings; //key:shadow
 
+	volatile bool interrupted;
 	sem_t start_loop;
 	sem_t loop_complete;
 	bool * ext_nif_busy;
 	int loop_status;
 
-} nif_xen_monitor; // To avoid double pointers
+} nif_xen_monitor;
 
 // Track one page containing instrumentation point
-typedef struct nif_page_node {
-	addr_t		frame;
+typedef struct _nif_page_node
+{
+	addr_t		orig_frame;
 	addr_t		shadow_frame;
+	addr_t		shadow_frame_ss;
 	GHashTable* 	offset_bp_mappings; // key:offset
 } nif_page_node;
 
@@ -109,15 +143,35 @@ typedef struct nif_page_node {
 // (write lock if RW lock is used) before the hook can be
 // disabled. Note that glib supports a RW lock, and pthread has a
 // spinlock implementation.
-typedef struct nif_hook_node {
+typedef struct _nif_hook_node
+{
 	addr_t			offset;
 	char 			name[SYSCALL_MAX_NAME_LEN];
 	nif_page_node*		parent;
 
+	// Callbacks registered by layer above us
 	nif_event_callback_t	pre_cb;
 	nif_event_callback_t	post_cb;
 	void* 			cb_arg;
 
+	bool                    trigger;
+
+	// Synchronization of callback:
+	//
+	// (1) The system cannot be torn down while a callback is
+	//     executing (since it might use libvmi), and
+	//
+	// (2) A callback cannot be deactivated while the callback is
+	//    executing, but
+	//
+	// (3) A callback can be executing on multiple vCPUs at once.
+	//
+	// Thus, a read lock must first be acquired before a callback
+	// can execute. A write lock must be acquired to deactivate a
+	// hook point and/or to tear down the system.
+	GRWLock               lock;
+	bool                  rlocked;
+	bool                  wlocked;
 	 // orig value in shadow frame (init instr point)
 	trap_val_t             backup_val1;
 #if defined(ARM64)
@@ -125,8 +179,6 @@ typedef struct nif_hook_node {
 	trap_val_t             backup_val2;
 #endif
 } nif_hook_node;
-
-static nif_hook_node* vcpu_hook_nodes[MAX_VCPUS];
 
 static nif_xen_monitor xa;
 
@@ -160,16 +212,61 @@ free_pg_hks_lst (gpointer data)
 				    hook_node->backup_val1);
 #if defined(ARM64)
 	status |= write_trap_val_pa (xa.vmi,
-				     MKADDR(hook_node->parent->frame, hook_node->offset) + 4,
+				     MKADDR(hook_node->parent->orig_frame, hook_node->offset) + 4,
 				     hook_node->backup_val2);
 #endif
-	if (VMI_SUCCESS != status) {
+	if (VMI_SUCCESS != status)
+	{
 		clog_error (CLOG(CLOGGER_ID),
 			    "Failed to restore original hookpoint values near PA=%" PRIx64 "",
 			    MKADDR(hook_node->parent->shadow_frame, hook_node->offset));
 	}
 
 	g_free(hook_node);
+}
+
+
+/**
+ * Compute the next view, based on the current state.
+ */
+static inline p2m_view_t
+get_requested_view (bool in_ss)
+{
+	// A reasonable way to fail...
+	p2m_view_t nextv = xa.trigger_view;
+
+	if (in_ss)
+	{
+		// Secondary (singlestep) breakpoint: go to requested view
+		if (xa.interrupted)
+		{
+			nextv = ALTP2M_DEFAULT_VIEW;
+			goto exit;
+		}
+		switch (xa.requested_level)
+		{
+		case NVMI_MONITOR_LEVEL_TRIGGERS:
+			nextv = xa.trigger_view;
+			break;
+		case NVMI_MONITOR_LEVEL_ACTIVE:
+			nextv = xa.active_view;
+			break;
+		default:
+			clog_error (CLOG(CLOGGER_ID),
+				    "How to handle current state?");
+		}
+	}
+	else
+	{
+		// Initial breakpoint: ARM goes to SS view, Intel to default
+#if defined(ARM64)
+		nextv = xa.ss_view;
+#else
+		nextv = ALTP2M_DEFAULT_VIEW;
+#endif
+	}
+exit:
+	return nextv;
 }
 
 
@@ -187,56 +284,92 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 	nif_hook_node* hook_node = NULL;
 	addr_t shadow = 0;
 
-	if (event->slat_id == 0) { // SW SINGLE STEP
-		event->slat_id = alt_view1;
-		// TODO: track post CBs on a per-vcpu basis and call appropriate one
-#if 0
-		hook_node = vcpu_hook_nodes [event->vcpu_id];
-		if (NULL != hook_node) {
-			if (hook_node->post_cb) {
-				hook_node->post_cb (hook_node->cb_arg);
+	// If applicable, handle event from single step view.
+	if (event->slat_id == xa.ss_view)
+	{
+		// Go back to "normal" view
+		event->slat_id = get_requested_view (true);
+
+		// Grab the hook node used to get us here to the secondary (SS) view
+		hook_node = xa.vcpu_hook_nodes [event->vcpu_id];
+		assert (NULL != hook_node && true == hook_node->rlocked);
+
+		if (NULL != hook_node)
+		{
+			if (hook_node->post_cb)
+			{
+				hook_node->post_cb (vmi, NULL, hook_node->cb_arg);
 			}
 		}
-#endif
+
+		if (hook_node->rlocked)
+		{
+			g_rw_lock_reader_unlock (&hook_node->lock);
+			hook_node->rlocked = false;
+		}
+
 		return (VMI_EVENT_RESPONSE_VMM_PAGETABLE_ID);
 	}
 
-	// lookup the gfn -- do we know about it?
-
+	// Otherwise this is the initial hook. Lookup the GFN -- do we know about it?
 	shadow = (addr_t) GPOINTER_TO_SIZE(
 		g_hash_table_lookup(xa.pframe_sframe_mappings,
 				    GSIZE_TO_POINTER(event->privcall_event.gfn)));
-	if (0 == shadow) {
+	if (0 == shadow)
+	{
 		// No need to reinject since SMC is not available to guest
 		return VMI_EVENT_RESPONSE_NONE;
 	}
 
 	pgnode = g_hash_table_lookup (xa.shadow_pnode_mappings,
 				      GSIZE_TO_POINTER(shadow));
-	if (NULL == pgnode) {
+	if (NULL == pgnode)
+	{
 		clog_error (CLOG(CLOGGER_ID), "Can't find pg_node for shadow: %" PRIx64 "", shadow);
 		return VMI_EVENT_RESPONSE_NONE;
 	}
 
 	hook_node = g_hash_table_lookup (pgnode->offset_bp_mappings,
 					 GSIZE_TO_POINTER(event->privcall_event.offset));
-	if (NULL == hook_node) {
-		clog_error (CLOG(CLOGGER_ID), "Warning: No BP record found for this offset %" PRIx64 " on page %" PRIx64 "",
+
+	xa.vcpu_hook_nodes [event->vcpu_id] = hook_node;
+	if (NULL == hook_node)
+	{
+		clog_error (CLOG(CLOGGER_ID), "No BP record found for this offset %" PRIx64 " on page %" PRIx64 "",
 			    event->privcall_event.offset, event->privcall_event.gfn);
 		return VMI_EVENT_RESPONSE_NONE;
 	}
 
-	// Otherwise, we found the hook node
-	if (hook_node->pre_cb) {
+	// We expect to move to SS view here, regardless of request or
+	// further results. Must switch to a view where this SMC does
+	// not exist (avoid loop)
+	event->slat_id = get_requested_view (false);
+
+	// We found the hook node. Lock it or bail out.
+	hook_node->rlocked = g_rw_lock_reader_trylock (&hook_node->lock);
+	if (!hook_node->rlocked)
+	{
+		clog_error (CLOG(CLOGGER_ID), "Failed to acquire lock for hook \"%s\". Blocking callback.",
+			    hook_node->name);
+		goto exit;
+	}
+
+	// Since the trigger and active views share frames, sometimes
+	// we'll incur a notification in trigger view for a
+	// non-trigger CB. In that case, don't notify the user.
+	// Since the trigger and active views share frames, sometimes
+	// we'll incur a notification in trigger view for a
+	// non-trigger CB. In that case, don't notify the user.
+	if (event->slat_id == xa.trigger_view && !hook_node->trigger)
+	{
+		clog_debug (CLOG(CLOGGER_ID), "Ignoring non-trigger hook in trigger view: %s", hook_node->name);
+	}
+	else if (hook_node->pre_cb)
+	{
 		hook_node->pre_cb (vmi, event, hook_node->cb_arg);
 	}
 
-	//vcpu_hook_nodes [event->vcpu_id] = hook_node;
-
-	if (event->slat_id == alt_view1) {
-		event->slat_id = 0;
-	}
-
+exit:
 	return (VMI_EVENT_RESPONSE_VMM_PAGETABLE_ID);
 }
 
@@ -259,7 +392,8 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 		g_hash_table_lookup (xa.pframe_sframe_mappings,
 				     GSIZE_TO_POINTER(event->interrupt_event.gfn)));
 
-	if (0 == shadow) {
+	if (0 == shadow)
+	{
 		clog_warn (CLOG(CLOGGER_ID), "Can't find shadow for gfn=%" PRIx64 ", reinjecting.", shadow);
 		event->interrupt_event.reinject = 1;
 		return VMI_EVENT_RESPONSE_NONE;
@@ -267,7 +401,8 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 
 	pgnode = g_hash_table_lookup (xa.shadow_pnode_mappings,
 				      GSIZE_TO_POINTER(shadow));
-	if (NULL == pgnode) {
+	if (NULL == pgnode)
+	{
 		clog_warn (CLOG(CLOGGER_ID), "Can't find page node for shadow=%" PRIx64 ", reinjecting.", shadow);
 		event->interrupt_event.reinject = 1;
 		return VMI_EVENT_RESPONSE_NONE;
@@ -275,7 +410,10 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 
 	hook_node = g_hash_table_lookup (pgnode->offset_bp_mappings,
 					 GSIZE_TO_POINTER (event->interrupt_event.offset));
-	if (NULL == hook_node) {
+
+	xa.vcpu_hook_nodes [event->vcpu_id] = hook_node;
+	if (NULL == hook_node)
+	{
 		clog_error (CLOG(CLOGGER_ID),
 			    "No BP record found for this offset %" PRIx64 " on page %" PRIx64 ", reinjecting.",
 			    event->interrupt_event.offset, event->interrupt_event.gfn);
@@ -283,20 +421,37 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 		return VMI_EVENT_RESPONSE_NONE;
 	}
 
-	// Otherwise, we found the hook node
-	if (hook_node->pre_cb) {
+	// We found the hook node. Lock it or bail out. First store it for SS callback.
+	hook_node->rlocked = g_rw_lock_reader_trylock (&hook_node->lock);
+	if (!hook_node->rlocked)
+	{
+		clog_error (CLOG(CLOGGER_ID), "Warning: Failed to acquire hook lock %s. Blocking callback.",
+			    hook_node->name);
+//		event->slat_id = get_requested_view (false);
+		goto exit;
+	}
+
+	// Since the trigger and active views share frames, sometimes
+	// we'll incur a notification in trigger view for a
+	// non-trigger CB. In that case, don't notify the user.
+	if (event->slat_id == xa.trigger_view && !hook_node->trigger)
+	{
+		clog_debug (CLOG(CLOGGER_ID), "Ignoring non-trigger hook in trigger view: %s", hook_node->name);
+	}
+	else if (hook_node->pre_cb)
+	{
 		hook_node->pre_cb (vmi, event, hook_node->cb_arg);
 	}
 
-	vcpu_hook_nodes [event->vcpu_id] = hook_node;
-
 exit:
 	event->interrupt_event.reinject = 0;
-	event-> slat_id = 0;
+	// Must switch to a view where this BP does not exist (avoid loop)
+	event->slat_id = get_requested_view (false);
 	return (VMI_EVENT_RESPONSE_TOGGLE_SINGLESTEP|
 		VMI_EVENT_RESPONSE_VMM_PAGETABLE_ID);
 }
 #endif // ARM64
+
 
 static void
 free_nif_page_node (gpointer data)
@@ -305,9 +460,10 @@ free_nif_page_node (gpointer data)
 
 	clog_debug (CLOG(CLOGGER_ID),
 		    "Disabling monitoring of mfn=%" PRIx64 ", shadow=%" PRIx64,
-		    pnode->frame, pnode->shadow_frame);
+		    pnode->orig_frame, pnode->shadow_frame);
 
-	if (NULL != pnode->offset_bp_mappings) {
+	if (NULL != pnode->offset_bp_mappings)
+	{
 		g_hash_table_destroy(pnode->offset_bp_mappings);
 	}
 
@@ -315,15 +471,22 @@ free_nif_page_node (gpointer data)
 	vmi_set_mem_event(xa.vmi,
 			  pnode->shadow_frame,
 			  VMI_MEMACCESS_N,
-			  alt_view1);
+			  xa.active_view);
 
-	xc_altp2m_change_gfn (xa.xci, xa.domain_id, alt_view1, pnode->frame, ~(0UL));
-	xc_altp2m_change_gfn (xa.xci, xa.domain_id, alt_view1, pnode->shadow_frame, ~(0UL));
-
+//	xc_altp2m_change_gfn (xa.xci, xa.domain_id, xa.active_view, pnode->frame, ALTP2M_DEFAULT_GFN);
+	xc_altp2m_change_gfn (xa.xci, xa.domain_id, xa.active_view, pnode->shadow_frame, ALTP2M_DEFAULT_GFN);
 	xc_domain_decrease_reservation_exact (xa.xci,
 					      xa.domain_id,
 					      1, 0,
 					      (xen_pfn_t*)&pnode->shadow_frame);
+#if defined(ARM64)
+	xc_altp2m_change_gfn (xa.xci, xa.domain_id, xa.active_view, pnode->shadow_frame_ss, ALTP2M_DEFAULT_GFN);
+	xc_domain_decrease_reservation_exact (xa.xci,
+					      xa.domain_id,
+					      1, 0,
+					      (xen_pfn_t*)&pnode->shadow_frame_ss);
+#endif
+
 	g_free (pnode);
 }
 
@@ -342,14 +505,16 @@ nif_is_monitored(addr_t kva, bool * monitored)
 	*monitored = false;
 
 	status = vmi_pagetable_lookup (xa.vmi, xa.kdtb, kva, &pa);
-	if (VMI_SUCCESS != status) {
+	if (VMI_SUCCESS != status)
+	{
 		rc = EINVAL;
 		clog_error (CLOG(CLOGGER_ID), "Failed to find PA for kernel VA=%" PRIx64 "", kva);
 		goto exit;
 	}
 /*
 	status = vmi_translate_kv2p (xa.vmi, kva, &pa);
-	if (VMI_SUCCESS != status) {
+	if (VMI_SUCCESS != status)
+	{
 		rc = EINVAL;
 		clog_error (CLOG(CLOGGER_ID), "Failed to find PA for VA=%" PRIx64 "", kva);
 		goto exit;
@@ -361,19 +526,22 @@ nif_is_monitored(addr_t kva, bool * monitored)
 	shadow_frame = (addr_t) GPOINTER_TO_SIZE (
 		g_hash_table_lookup (xa.pframe_sframe_mappings, GSIZE_TO_POINTER(frame)));
 
-	if (0 == shadow_frame) {
+	if (0 == shadow_frame)
+	{
 		goto exit;
 	}
 
 	pgnode = g_hash_table_lookup(xa.shadow_pnode_mappings,
 				     GSIZE_TO_POINTER(shadow_frame));
-	if (NULL == pgnode) {
+	if (NULL == pgnode)
+	{
 		goto exit;
 	}
 
 	hook_node = g_hash_table_lookup(pgnode->offset_bp_mappings,
 					GSIZE_TO_POINTER(offset));
-	if (NULL == hook_node) {
+	if (NULL == hook_node)
+	{
 		goto exit;
 	}
 
@@ -384,20 +552,22 @@ exit:
 }
 
 
+// TODO: refactor this -- it's too big
 int
 nif_enable_monitor (addr_t kva,
 		    const char* name,
 		    nif_event_callback_t pre_cb,
 		    nif_event_callback_t post_cb,
-		    void* cb_arg)
+		    void* cb_arg,
+		    bool is_trigger)
 {
 	int rc = 0;
 	size_t ret;
 	status_t status;
 	nif_page_node * pgnode  = NULL;
 	nif_hook_node * hook_node = NULL;
-	addr_t pa, frame, offset;
-	addr_t shadow, shadow_frame;
+	addr_t pa, orig_frame, offset;
+	addr_t shadow_frame = 0, shadow_frame_ss = 0;
 	uint8_t buff[DOM_PAGE_SIZE] = {0};
 	addr_t dtb = 0;
 	trap_val_t orig1 = 0;
@@ -410,92 +580,121 @@ nif_enable_monitor (addr_t kva,
 #if defined(ARM64)
 	status |= read_trap_val_va (xa.vmi, kva+4, &orig2);
 #endif
-	if (VMI_SUCCESS != status) {
+	if (VMI_SUCCESS != status)
+	{
 		rc = EACCES;
 		clog_error (CLOG(CLOGGER_ID), "Failed to read orig val near %" PRIx64 "", kva);
 		goto exit;
 	}
 
 	status = vmi_pagetable_lookup (xa.vmi, xa.kdtb, kva, &pa);
-	if (VMI_SUCCESS != status) {
+	if (VMI_SUCCESS != status)
+	{
 		rc = EINVAL;
 		clog_error (CLOG(CLOGGER_ID), "Failed to find PA for kernel VA=%" PRIx64 "", kva);
 		goto exit;
 	}
 
-	frame = pa >> PG_OFFSET_BITS;
+	orig_frame = pa >> PG_OFFSET_BITS;
 	offset = pa % DOM_PAGE_SIZE;
 
 	shadow_frame = (addr_t) GPOINTER_TO_SIZE (g_hash_table_lookup(xa.pframe_sframe_mappings,
-								      GSIZE_TO_POINTER(frame)));
-	if (0 == shadow_frame) {
+								      GSIZE_TO_POINTER(orig_frame)));
+	if (0 == shadow_frame)
+	{
 		// Allocate frame if not already there
 		shadow_frame = ++(xa.max_gpfn);
-
 		rc = xc_domain_populate_physmap_exact (xa.xci, xa.domain_id, 1, 0, 0, (xen_pfn_t*)&shadow_frame);
-		if (rc < 0) {
+		if (rc < 0)
+		{
 			rc = ENOMEM;
-			clog_error (CLOG(CLOGGER_ID),
-				    "Failed to allocate frame at %" PRIx64 "", shadow_frame);
+			clog_error (CLOG(CLOGGER_ID), "Failed to allocate frame at %" PRIx64 "", shadow_frame);
 			goto exit;
 		}
 
-		g_hash_table_insert (xa.pframe_sframe_mappings, //create new translation
-				     GSIZE_TO_POINTER(frame),
-				     GSIZE_TO_POINTER(shadow_frame));
-
-		// Update p2m mapping: alt_view1: frame --> shadow_frame
-		rc = xc_altp2m_change_gfn(xa.xci, xa.domain_id, alt_view1, frame, shadow_frame);
-		if (rc) {
+		// Update p2m mapping: active_view: frame --> shadow_frame
+		rc = xc_altp2m_change_gfn (xa.xci, xa.domain_id, xa.active_view, orig_frame, shadow_frame);
+		if (rc)
+		{
 			rc = EACCES;
-			clog_error (CLOG(CLOGGER_ID), "Shadow: Unable to change mapping for alt_view1\n");
+			clog_error (CLOG(CLOGGER_ID), "Shadow: Unable to change mapping for active_view");
 			goto exit;
 		}
+
+#if defined(ARM64)
+		shadow_frame_ss = ++(xa.max_gpfn);
+		rc = xc_domain_populate_physmap_exact (xa.xci, xa.domain_id, 1, 0, 0, (xen_pfn_t*)&shadow_frame_ss);
+		if (rc < 0)
+		{
+			rc = ENOMEM;
+			clog_error (CLOG(CLOGGER_ID), "Failed to allocate frame at %" PRIx64 "", shadow_frame);
+			goto exit;
+		}
+
+		rc = xc_altp2m_change_gfn (xa.xci, xa.domain_id, xa.ss_view, orig_frame, shadow_frame);
+		if (rc)
+		{
+			rc = EACCES;
+			clog_error (CLOG(CLOGGER_ID), "Shadow: Unable to change mapping for active_view");
+			goto exit;
+		}
+#endif
+		// Record the new translation
+		g_hash_table_insert (xa.pframe_sframe_mappings,
+				     GSIZE_TO_POINTER(orig_frame), GSIZE_TO_POINTER(shadow_frame));
 	}
 
 	// shadow_frame is now known
-	clog_debug (CLOG(CLOGGER_ID), "shadow %lx shadow_frame %lx for va %lx",
-		    shadow, shadow_frame, kva);
+	clog_debug (CLOG(CLOGGER_ID), "shadow_frame %lx for va %lx", shadow_frame, kva);
 
 	pgnode = g_hash_table_lookup(xa.shadow_pnode_mappings, GSIZE_TO_POINTER(shadow_frame));
-	if (NULL == pgnode) {
+	if (NULL == pgnode)
+	{
 		// Copy orig frame into shadow
-		status = vmi_read_pa(xa.vmi,
-				     MKADDR(frame, 0),
-				     DOM_PAGE_SIZE,
-				     buff,
-				     &ret);
-		if (DOM_PAGE_SIZE != ret || status == VMI_FAILURE) {
+		status = vmi_read_pa(xa.vmi, MKADDR(orig_frame, 0), DOM_PAGE_SIZE, buff, &ret);
+		if (DOM_PAGE_SIZE != ret || status == VMI_FAILURE)
+		{
 			rc = EACCES;
-			clog_error (CLOG(CLOGGER_ID), "Shadow: Failed to read target page, frame=%lx", frame);
+			clog_error (CLOG(CLOGGER_ID), "Shadow: Failed to read target page, frame=%lx", orig_frame);
 			goto exit;
 		}
 
-		status = vmi_write_pa(xa.vmi,
-				      MKADDR(shadow_frame, 0),
-				      DOM_PAGE_SIZE,
-				      buff,
-				      &ret);
-		if (DOM_PAGE_SIZE != ret || status == VMI_FAILURE) {
+		status = vmi_write_pa(xa.vmi, MKADDR(shadow_frame, 0), DOM_PAGE_SIZE, buff, &ret);
+		if (DOM_PAGE_SIZE != ret || status == VMI_FAILURE)
+		{
 			rc = EACCES;
 			clog_error (CLOG(CLOGGER_ID), "Shadow: Failed to write to shadow page");
 			goto exit;
 		}
 
+#if defined(ARM64)
+		// Copy orig into shadow SS
+		status = vmi_write_pa(xa.vmi, MKADDR(shadow_frame_ss, 0), DOM_PAGE_SIZE, buff, &ret);
+		if (DOM_PAGE_SIZE != ret || status == VMI_FAILURE)
+		{
+			rc = EACCES;
+			clog_error (CLOG(CLOGGER_ID), "Shadow: Failed to write to shadow SS page");
+			goto exit;
+		}
+#endif
 		// Update the hks list
-		pgnode               = g_new0(nif_page_node, 1);
-		pgnode->shadow_frame = shadow_frame;
-		pgnode->frame        = frame;
+		pgnode                  = g_new0(nif_page_node, 1);
+		pgnode->shadow_frame    = shadow_frame;
+		pgnode->shadow_frame_ss = shadow_frame_ss; // Intel: this is 0
+		pgnode->orig_frame      = orig_frame;
 		pgnode->offset_bp_mappings = g_hash_table_new_full (NULL, NULL, NULL, free_pg_hks_lst);
 
 		g_hash_table_insert (xa.shadow_pnode_mappings,
 				     GSIZE_TO_POINTER(shadow_frame),
 				     pgnode);
-	} else {
+	}
+	else
+	{
 		// Check for existing hooks: if one exists, we're done
 		hook_node = g_hash_table_lookup (pgnode->offset_bp_mappings,
 						 GSIZE_TO_POINTER(offset));
-		if (NULL != hook_node) {
+		if (NULL != hook_node)
+		{
 			clog_error (CLOG(CLOGGER_ID), "Found hook already in place for va %" PRIx64 "", kva);
 			goto exit;
 		}
@@ -507,18 +706,37 @@ nif_enable_monitor (addr_t kva,
 	// Intel too -- is a second #BP faster than single stepping?
 
 	// Write the trap/smc value(s): The first goes in the shadow
-	// page, the second (ARM only) goes in the orig page.
-	clog_debug (CLOG(CLOGGER_ID), "Writing trap %x to PA (ARM: and PA+4) %" PRIx64 ", backup1=%x",
-		    trap, shadow, orig1);
-
-	status  = write_trap_val_pa (xa.vmi, MKADDR(shadow_frame, offset), trap);
+	// page, the second (ARM only) goes in the SS page.
+	clog_debug (CLOG(CLOGGER_ID), "Writing trap %x to PA %" PRIx64 ", backup1=%x",
+		    TRAP_CODE, MKADDR(shadow_frame, offset), orig1);
+	status  = write_trap_val_pa (xa.vmi, MKADDR(shadow_frame, offset), TRAP_CODE);
 #if defined(ARM64)
-	status |= write_trap_val_pa (xa.vmi, MKADDR(frame,  offset) + 4, trap);
+	clog_debug (CLOG(CLOGGER_ID), "ARM: Writing SS trap %x to PA %" PRIx64 ", backup2=%x",
+		    TRAP_CODE, MKADDR(shadow_frame_ss, offset) + 1, orig2);
+	status |= write_trap_val_pa (xa.vmi, MKADDR(shadow_frame_ss, offset) + 4, TRAP_CODE);
 #endif
-	if (VMI_SUCCESS != status) {
+	if (VMI_SUCCESS != status)
+	{
 		rc = EACCES;
-		clog_error (CLOG(CLOGGER_ID), "Failed to write trap val at orig or shadow page");
+		clog_error (CLOG(CLOGGER_ID), "Failed to write trap val in a shadow page");
 		goto exit;
+	}
+
+	// In case of a triggering instr point, write it to the
+	// default view (for now). Note the TRAP_CODE was already
+	// written into shadow_frame.  FIXME:
+	if (is_trigger)
+	{
+		clog_info (CLOG(CLOGGER_ID), "Trap %s put in trigger view", name);
+
+		// Update p2m mapping: trigger_view: frame --> shadow_frame
+		rc = xc_altp2m_change_gfn (xa.xci, xa.domain_id, xa.trigger_view, orig_frame, shadow_frame);
+		if (rc)
+		{
+			rc = EACCES;
+			clog_error (CLOG(CLOGGER_ID), "Shadow: Unable to change mapping for active_view");
+			goto exit;
+		}
 	}
 
 	// Create new hook node and save it
@@ -529,18 +747,65 @@ nif_enable_monitor (addr_t kva,
 	hook_node->pre_cb     = pre_cb;
 	hook_node->post_cb    = post_cb;
 	hook_node->cb_arg     = cb_arg;
-
+	hook_node->trigger    = is_trigger;
 	hook_node->backup_val1 = orig1;
 #if defined(ARM64)
 	hook_node->backup_val2 = orig2;
 #endif
 
-	g_hash_table_insert(pgnode->offset_bp_mappings,
-			    GSIZE_TO_POINTER(offset),
-			    hook_node);
+	g_hash_table_insert(pgnode->offset_bp_mappings, GSIZE_TO_POINTER(offset), hook_node);
+
 exit:
 	return rc;
 }
+
+
+int
+nif_disable_monitor (addr_t kva)
+{
+	int rc = ENOTSUP;
+
+exit:
+	return rc;
+}
+
+
+int
+nif_set_level (nvmi_level_t level)
+{
+	int rc = 0;
+	const char * lname = "<Unknown>";
+
+
+	switch (level)
+	{
+	case   NVMI_MONITOR_LEVEL_TRIGGERS:
+		lname = "TRIGGER";
+		break;
+	case   NVMI_MONITOR_LEVEL_ACTIVE:
+		lname = "ACTIVE";
+		break;
+	case   NVMI_MONITOR_LEVEL_PARANOID:
+		lname = "PARANOID";
+		break;
+
+	case	NVMI_MONITOR_LEVEL_UNSET:
+	default:
+		clog_info (CLOG(CLOGGER_ID),
+			   "Unexpected monitoring level requested: %d", level);
+		rc = EINVAL;
+		goto exit;
+	}
+
+	xa.requested_level = level;
+
+exit:
+	clog_info (CLOG(CLOGGER_ID),
+		   "Requested monitoring level: %s", lname);
+
+	return rc;
+}
+
 
 
 
@@ -549,7 +814,26 @@ exit:
 static event_response_t
 singlestep_cb(vmi_instance_t vmi, vmi_event_t* event)
 {
-	event->slat_id = alt_view1;
+
+	nif_hook_node* hook_node = xa.vcpu_hook_nodes [event->vcpu_id];
+
+	assert (NULL != hook_node); // && true == hook_node->locked);
+
+	if (NULL != hook_node)
+	{
+		if (hook_node->post_cb)
+		{
+			hook_node->post_cb (vmi, NULL, hook_node->cb_arg);
+		}
+	}
+
+	if (hook_node->rlocked)
+	{
+		g_rw_lock_reader_unlock (&hook_node->lock);
+		hook_node->rlocked = false;
+	}
+
+	event->slat_id = get_requested_view (true);
 
 	return (VMI_EVENT_RESPONSE_TOGGLE_SINGLESTEP|
 		VMI_EVENT_RESPONSE_VMM_PAGETABLE_ID);
@@ -563,19 +847,22 @@ setup_ss_events (vmi_instance_t vmi)
 
 	clog_info (CLOG(CLOGGER_ID), "Domain vcpus=%d", vcpus);
 
-	if (0 == vcpus) {
+	if (0 == vcpus)
+	{
 		rc = EIO;
 		clog_error (CLOG(CLOGGER_ID), "Failed to find the total VCPUs");
 		goto exit;
 	}
 
-	if (vcpus > MAX_VCPUS) {
+	if (vcpus > MAX_VCPUS)
+	{
 		rc = EINVAL;
 		clog_error (CLOG(CLOGGER_ID), "Guest VCPUS are greater than what we can support");
 			goto exit;
 	}
 
-	for (int i = 0; i < vcpus; i++) {
+	for (int i = 0; i < vcpus; i++)
+	{
 		SETUP_SINGLESTEP_EVENT (&ss_event[i], 1u << i, singlestep_cb, 0);
 
 		if (VMI_SUCCESS != vmi_register_event(vmi, &ss_event[i])) {
@@ -613,7 +900,7 @@ cr3_cb(vmi_instance_t vmi, vmi_event_t* event)
 static event_response_t
 mem_intchk_cb (vmi_instance_t vmi, vmi_event_t* event)
 {
-	clog_info (CLOG(CLOGGER_ID), "\nIntegrity check served\n");
+	clog_info (CLOG(CLOGGER_ID), "Integrity check served");
 
 	event->slat_id = 0;
 
@@ -623,38 +910,105 @@ mem_intchk_cb (vmi_instance_t vmi, vmi_event_t* event)
 #endif
 
 
-static void fini_xen_monitor(void)
+static void
+fini_xen_monitor(void)
 {
-	if (xa.xcx) {
-		if (0 != libxl_ctx_free(xa.xcx)) {
-			clog_error (CLOG(CLOGGER_ID), "Failed to close xl handle\n");
+	if (xa.xcx)
+	{
+		if (0 != libxl_ctx_free(xa.xcx))
+		{
+			clog_error (CLOG(CLOGGER_ID), "Failed to close xl handle");
 		}
 		xa.xcx = NULL;
 	}
 
-	if (xa.xci) {
-		if (0 != xc_interface_close(xa.xci)) {
-			clog_error (CLOG(CLOGGER_ID), "Failed to close connection to xen interface\n");
+	if (xa.xci)
+	{
+		if (0 != xc_interface_close(xa.xci))
+		{
+			clog_error (CLOG(CLOGGER_ID), "Failed to close connection to xen interface");
 		}
 		xa.xci = NULL;
 	}
 }
 
 
-static void destroy_views(uint32_t domain_id)
+static void
+destroy_views (void)
 {
-	if (NULL == xa.xci) {
+	if (NULL == xa.xci)
+	{
 		return;
 	}
 
-	if (0 != xc_altp2m_switch_to_view(xa.xci, domain_id, 0))
-		clog_error (CLOG(CLOGGER_ID), "Failed to switch to exe view in func destroy_view");
+	if (0 != xc_altp2m_switch_to_view(xa.xci, xa.domain_id, ALTP2M_DEFAULT_VIEW))
+	{
+		clog_error (CLOG(CLOGGER_ID), "Failed to switch to default view");
+	}
 
-	if (alt_view1)
-		xc_altp2m_destroy_view(xa.xci, domain_id, alt_view1);
+	if (xa.active_view)
+	{
+		xc_altp2m_destroy_view(xa.xci, xa.domain_id, xa.active_view);
+		xa.active_view = 0;
+	}
 
-	if (0 != xc_altp2m_set_domain_state(xa.xci, domain_id, 0))
-		clog_error (CLOG(CLOGGER_ID), "Failed to disable alternate view for domain_id: %u",domain_id);
+	if (xa.trigger_view)
+	{
+		xc_altp2m_destroy_view(xa.xci, xa.domain_id, xa.trigger_view);
+		xa.trigger_view = 0;
+	}
+
+	if (xa.ss_view)
+	{
+		xc_altp2m_destroy_view (xa.xci, xa.domain_id, xa.ss_view);
+		xa.ss_view = 0;
+	}
+
+	if (0 != xc_altp2m_set_domain_state(xa.xci, xa.domain_id, 0))
+	{
+		clog_error (CLOG(CLOGGER_ID), "Failed to disable altp2m for domain_id: %u", xa.domain_id);
+	}
+}
+
+static void
+allow_callbacks (bool allowed)
+{
+	GList * pages = NULL;
+	GList * ipage = NULL;
+
+	pages = g_hash_table_get_values (xa.shadow_pnode_mappings);
+
+	for (ipage = pages; ipage != NULL; ipage = ipage->next)
+	{
+		GList * hooks = NULL;
+		GList * ihook = NULL;
+		nif_page_node * pgnode = ipage->data;
+		hooks = g_hash_table_get_values ((GHashTable *) pgnode->offset_bp_mappings);
+
+		for (ihook = hooks; ihook != NULL; ihook = ihook->next)
+		{
+			nif_hook_node * node = (nif_hook_node *) ihook->data;
+			clog_debug (CLOG(CLOGGER_ID), "%sing node %s",
+				    (allowed ? "Unlock" : "Lock"),
+				    node->name);
+			if (allowed)
+			{
+				if (node->wlocked)
+				{
+					g_rw_lock_writer_unlock (&node->lock);
+					node->wlocked = false;
+				}
+
+			}
+			else
+			{
+				g_rw_lock_writer_lock (&node->lock);
+				node->wlocked = true;
+			}
+		} // inner for
+		g_list_free (hooks);
+	} // outer
+	g_list_free (pages);
 }
 
 
@@ -662,37 +1016,41 @@ static int
 init_xen_monitor(const char* name)
 {
 	int rc = 0;
-	if (0 == (xa.xci = xc_interface_open(NULL, NULL, 0))) {
-		clog_error (CLOG(CLOGGER_ID), "Failed to open xen interface\n");
+	if (0 == (xa.xci = xc_interface_open(NULL, NULL, 0)))
+	{
+		clog_error (CLOG(CLOGGER_ID), "Failed to open xen interface");
 		return EIO; // nothing to clean
 	}
 
-	if (libxl_ctx_alloc(&xa.xcx, LIBXL_VERSION, 0, NULL)) {
+	if (libxl_ctx_alloc(&xa.xcx, LIBXL_VERSION, 0, NULL))
+	{
 		rc = ENOMEM;
-		clog_error (CLOG(CLOGGER_ID), "Unable to create xl context\n");
+		clog_error (CLOG(CLOGGER_ID), "Unable to create xl context");
 		goto clean;
 	}
 
-
-	if ( libxl_name_to_domid(xa.xcx, name, &xa.domain_id)) {
+	if ( libxl_name_to_domid(xa.xcx, name, &xa.domain_id))
+	{
 		rc = EINVAL;
-		clog_error (CLOG(CLOGGER_ID), "Unable to get domain id for %s\n", name);
+		clog_error (CLOG(CLOGGER_ID), "Unable to get domain id for %s", name);
 		goto clean;
 	}
 
-	if (0 == (xa.orig_mem_size = vmi_get_memsize(xa.vmi))) {
+	if (0 == (xa.orig_mem_size = vmi_get_memsize(xa.vmi)))
+	{
 		rc = EIO;
-		clog_error (CLOG(CLOGGER_ID), "Failed to get domain memory size\n");
+		clog_error (CLOG(CLOGGER_ID), "Failed to get domain memory size");
 		goto clean;
 	}
 
-	if (xc_domain_maximum_gpfn(xa.xci, xa.domain_id, &xa.max_gpfn) < 0) {
+	if (xc_domain_maximum_gpfn(xa.xci, xa.domain_id, &xa.max_gpfn) < 0)
+	{
 		rc = EIO;
-		clog_error (CLOG(CLOGGER_ID), "Failed to get max gpfn for the domain\n");
+		clog_error (CLOG(CLOGGER_ID), "Failed to get max gpfn for the domain");
 		goto clean;
 	}
 
-	//clog_info (CLOG(CLOGGER_ID), "\nMax gfn:%" PRIx64 "",xa.max_gpfn);
+	//clog_info (CLOG(CLOGGER_ID), "Max gfn:%" PRIx64 "",xa.max_gpfn);
 	return 0;
 
 clean:
@@ -712,7 +1070,7 @@ nif_event_loop_worker (void * arg)
 
 	sem_wait (&xa.start_loop);
 
-	if (interrupted)
+	if (xa.interrupted)
 	{
 		goto exit;
 	}
@@ -728,7 +1086,8 @@ nif_event_loop_worker (void * arg)
 	}
 #else
 	rc = setup_ss_events(xa.vmi);
-	if (rc) {
+	if (rc)
+	{
 		goto exit;
 	}
 
@@ -739,7 +1098,8 @@ nif_event_loop_worker (void * arg)
 #endif
 
 	main_event.data = &xa;
-	if (VMI_SUCCESS != vmi_register_event (xa.vmi, &main_event)) {
+	if (VMI_SUCCESS != vmi_register_event (xa.vmi, &main_event))
+	{
 		clog_error (CLOG(CLOGGER_ID), "Unable to register interrupt event");
 		goto exit;
 	}
@@ -749,7 +1109,8 @@ nif_event_loop_worker (void * arg)
 	// cache on a callback, we should invalidate it in the
 	// callback and not add another callback!
 	SETUP_REG_EVENT (&cr3_event, CR3, VMI_REGACCESS_W, 0, cr3_cb);
-	if (VMI_SUCCESS != vmi_register_event (xa.vmi, &cr3_event)) {
+	if (VMI_SUCCESS != vmi_register_event (xa.vmi, &cr3_event))
+	{
 		clog_error (CLOG(CLOGGER_ID), "Failed to setup cr3 event");
 		goto exit;
 	}
@@ -760,11 +1121,11 @@ nif_event_loop_worker (void * arg)
 	clog_info (CLOG(CLOGGER_ID), "Entering VMI event loop: resuming VM");
 	vmi_resume_vm (xa.vmi);
 
-	while (!interrupted) {
+	while (!xa.interrupted) {
 		status_t status = vmi_events_listen (xa.vmi, 500);
 		if (status != VMI_SUCCESS) {
 			clog_error (CLOG(CLOGGER_ID), "Some issue in the event_listen loop. Aborting!");
-			interrupted = true;
+			xa.interrupted = true;
 			rc = EBUSY;
 		}
 	}
@@ -804,7 +1165,7 @@ nif_fini(void)
 		g_hash_table_destroy (xa.pframe_sframe_mappings);
 	}
 
-	destroy_views(xa.domain_id);
+	destroy_views();
 
 	fini_xen_monitor();
 
@@ -836,7 +1197,7 @@ nif_init(const char* name,
 	    vmi_init_complete(&xa.vmi, (void*)name, VMI_INIT_DOMAINNAME| VMI_INIT_EVENTS,NULL,
 			      VMI_CONFIG_GLOBAL_FILE_ENTRY, NULL, NULL)) {
 		rc = EIO;
-		clog_error (CLOG(CLOGGER_ID), "Failed to init LibVMI library.\n");
+		clog_error (CLOG(CLOGGER_ID), "Failed to init LibVMI library.");
 		goto exit;
 	}
 
@@ -851,26 +1212,48 @@ nif_init(const char* name,
 	// Pause the VM here. It is resumed via nif_event_loop() and nif_fini()
 	vmi_pause_vm(xa.vmi);
 
-	if (0 != xc_altp2m_set_domain_state(xa.xci, xa.domain_id, 1)) {
+	if (0 != xc_altp2m_set_domain_state(xa.xci, xa.domain_id, 1))
+	{
 		rc = EIO;
-		clog_error (CLOG(CLOGGER_ID), "Failed to enable altp2m for domain_id: %u\n", xa.domain_id);
+		clog_error (CLOG(CLOGGER_ID), "Failed to enable altp2m for domain_id: %u", xa.domain_id);
 		goto exit;
 	}
 
-	if (0 != xc_altp2m_create_view(xa.xci, xa.domain_id, 0, &alt_view1)) {
+	if (0 != xc_altp2m_create_view (xa.xci, xa.domain_id, 0, &xa.trigger_view))
+	{
 		rc = EIO;
-		clog_error (CLOG(CLOGGER_ID), "Failed to create execute view\n");
+		clog_error (CLOG(CLOGGER_ID), "Failed to create trigger view");
 		goto exit;
 	}
 
+//	clog_warn (CLOG(CLOGGER_ID), "Fixing trigger view to default view");
+//	xa.trigger_view = ALTP2M_DEFAULT_VIEW;
 
-	if (0 != xc_altp2m_switch_to_view(xa.xci, xa.domain_id, alt_view1)) {
+	if (0 != xc_altp2m_create_view (xa.xci, xa.domain_id, 0, &xa.active_view))
+	{
 		rc = EIO;
-		clog_error (CLOG(CLOGGER_ID), "Failed to switch to execute view id:%u\n", alt_view1);
+		clog_error (CLOG(CLOGGER_ID), "Failed to create active view");
 		goto exit;
 	}
 
-	clog_info (CLOG(CLOGGER_ID), "Altp2m: alt_view1 created and activated");
+#if defined(ARM64)
+	if (0 != xc_altp2m_create_view (xa.xci, xa.domain_id, 0, &xa.ss_view))
+	{
+		rc = EIO;
+		clog_error (CLOG(CLOGGER_ID), "Failed to create SS view");
+		goto exit;
+	}
+#endif
+	// Policy: start the monitoring off in trigger view
+	if (0 != xc_altp2m_switch_to_view (xa.xci, xa.domain_id, xa.trigger_view))
+	{
+		rc = EIO;
+		clog_error (CLOG(CLOGGER_ID), "Failed to switch to active view id:%u", xa.active_view);
+		goto exit;
+	}
+	xa.requested_level = NVMI_MONITOR_LEVEL_TRIGGERS;
+
+	clog_info (CLOG(CLOGGER_ID), "Altp2m: active_view created and activated");
 
 	status = vmi_pid_to_dtb (xa.vmi, 0, &xa.kdtb);
 	if (VMI_FAILURE == status) {
@@ -905,11 +1288,16 @@ nif_get_vmi (vmi_instance_t * vmi)
 	return 0;
 }
 
+
+
 void
 nif_stop (void)
 {
+	// Lock all callbacks out
+	allow_callbacks (false);
+
 	// Called via signal handler; don't block
-	interrupted = true;
+	xa.interrupted = true;
 
 	// Kick off event loop in case it hasn't started yet
 	sem_post (&xa.start_loop);

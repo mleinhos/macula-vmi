@@ -45,7 +45,6 @@
 #include "process_kill_helper.h"
 #include "nvmi-internal-defs.h"
 
-
 /*
  * Stopgap measure while we're working on reading userspace memory
  * contents. Do NOT define this in master until that capability
@@ -67,6 +66,7 @@
 
 #define KILL_PID_NONE ((vmi_pid_t)-1)
 
+#define TRIGGER_EVENT_LIMIT (500)
 
 //
 // Special instrumentation points
@@ -127,6 +127,12 @@ typedef struct _nvmi_state {
 	// Handles inboudn requests over ZMQ
 	GThread * request_service_thread;
 
+	// Triggered processes: number of processes that have an
+	// caused the switch to ACTIVE view.
+	unsigned long triggered_procs;
+
+	// The currently-requested monitoring level
+	nvmi_level_t level;
 } nvmi_state_t;
 
 static nvmi_state_t gstate = {0};
@@ -568,12 +574,14 @@ cb_gather_context (vmi_instance_t vmi,
 	addr_t curr = 0;
 
 	rc = cb_gather_registers (vmi, vmievent, &evt->r, argct);
-	if (rc) {
+	if (rc)
+	{
 		goto exit;
 	}
 
 	rc = cb_current_task (vmi, vmievent, &evt->r, &curr);
-	if (rc) {
+	if (rc)
+	{
 		clog_warn (CLOG(CLOGGER_ID), "Context could not be found");
 		goto exit;
 	}
@@ -586,11 +594,14 @@ cb_gather_context (vmi_instance_t vmi,
 	task = g_hash_table_lookup (gstate.context_lookup, (gpointer)curr);
 	g_rw_lock_reader_unlock (&gstate.context_lock);
 
-	if (NULL == task) {
+	if (NULL == task)
+	{
 		// Build new context
 		rc = cb_build_task_context (vmi, &evt->r, curr, &task);
-		if (rc) {
-			if (0 == task->pid) {
+		if (rc)
+		{
+			if (0 == task->pid)
+			{
 				goto exit;
 			}
 			clog_warn (CLOG(CLOGGER_ID),
@@ -606,6 +617,9 @@ cb_gather_context (vmi_instance_t vmi,
 		g_rw_lock_writer_lock (&gstate.context_lock);
 		g_hash_table_insert (gstate.context_lookup, (gpointer)task->key, task);
 		g_rw_lock_writer_unlock (&gstate.context_lock);
+
+		// Policy
+		task->trigger_event_limit = TRIGGER_EVENT_LIMIT;
 		// The table owns a reference to the task context.
 //		atomic_inc (&task->refct);
 	}
@@ -882,6 +896,62 @@ exit:
 
 
 /**
+ * Policy!!
+ */
+static inline void
+cb_update_trigger_state (nvmi_cb_info_t * cbi,
+			 nvmi_task_info_t * task)
+{
+	// Sanity check: Can do neither in one CB, but can't do both!
+	assert ((!cbi->state.trigger && !cbi->state.trigger_off) ||
+		cbi->state.trigger != cbi->state.trigger_off);
+
+	assert (task->trigger_event_limit > 0);
+
+	if (cbi->state.trigger)
+	{
+		// Even if this has already caused a trigger, reset its stats
+		if (!task->triggered)
+		{
+			clog_info (CLOG(CLOGGER_ID),
+				   "Initiating trigger: event %s proc %s", cbi->name, task->comm);
+
+			nif_set_level (NVMI_MONITOR_LEVEL_ACTIVE);
+			gstate.level = NVMI_MONITOR_LEVEL_ACTIVE;
+			atomic_inc (&gstate.triggered_procs);
+			task->triggered = true;
+		}
+		task->events_since_trigger = 0;
+	}
+	else
+	{
+		// A non-triggering CB: track stats, switch back to TRIGGER view if needed
+		unsigned long ct = atomic_inc (&task->events_since_trigger);
+
+		if (ct > task->trigger_event_limit || cbi->state.trigger_off)
+		{
+			unsigned long pct = atomic_dec (&gstate.triggered_procs);
+
+			clog_warn (CLOG(CLOGGER_ID),
+				   "Saw over threshold of events, or event untriggers");
+
+			task->triggered = false;
+			task->events_since_trigger = 0;
+
+			clog_info (CLOG(CLOGGER_ID),
+				   "Dropping trigger: event %s proc %s", cbi->name, task->comm);
+
+			if (0 == pct)
+			{
+				nif_set_level (NVMI_MONITOR_LEVEL_TRIGGERS);
+				gstate.level = NVMI_MONITOR_LEVEL_TRIGGERS;
+			}
+		}
+	}
+}
+
+
+/**
  * cb_pre_instr_pt()
  *
  * Called as entry point to any event callback.
@@ -907,6 +977,7 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 	}
 
 	atomic_inc (&cbi->hitct);
+	cb_update_trigger_state (cbi, evt->task);
 
 	// Only syscall events have arguments to parse
 	for (int i = 0; i < cbi->argct; ++i)
@@ -1015,7 +1086,9 @@ exit:
 static void
 cb_post_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 {
-	printf ("Post: Hit breakpoint: %s", (const char*) arg);
+	nvmi_cb_info_t * cbi = (nvmi_cb_info_t *) arg;
+	clog_info (CLOG(CLOGGER_ID),
+		   "Post CB for callback %s", cbi->name);
 }
 
 
@@ -1033,7 +1106,7 @@ instrument_special_point (const char *name, addr_t kva)
 			continue;
 		}
 
-		rc = nif_enable_monitor (kva, name, cb_pre_instr_pt, cb_post_instr_pt, cbi);
+		rc = nif_enable_monitor (kva, name, cb_pre_instr_pt, cb_post_instr_pt, cbi, cbi->state.trigger);
 		if (rc) {
 			clog_warn (CLOG(CLOGGER_ID), "Failed to add pg/bp for %s at %" PRIx64 "", name, kva);
 			goto exit;
@@ -1138,7 +1211,7 @@ instrument_syscall (char *name, addr_t kva)
 		goto exit;
 	}
 
-	rc = nif_enable_monitor (kva, name, cb_pre_instr_pt, cb_post_instr_pt, cbi);
+	rc = nif_enable_monitor (kva, name, cb_pre_instr_pt, NULL /*cb_post_instr_pt*/, cbi, cbi->state.trigger);
 	if (rc) {
 		clog_warn (CLOG(CLOGGER_ID), "Failed to add pg/bp for %s at %" PRIx64 "", name, kva);
 		goto exit;
@@ -1311,7 +1384,7 @@ consume_special_event (nvmi_event_t * evt)
 	{
 		event_ready = false;
 	}
-	
+
 	if (gstate.use_comms && event_ready)
 	{
 		event.len = htobe32 (size);
@@ -1477,7 +1550,7 @@ consume_syscall_event (nvmi_event_t * evt)
 	if (cbi->state.reset_ctx)
 	{
 		clog_info (CLOG(CLOGGER_ID), "Invalidating context of task pid=%d", evt->task->pid);
-		
+
 		g_rw_lock_writer_lock (&gstate.context_lock);
 		g_hash_table_remove (gstate.context_lookup, (gpointer) evt->task->key);
 		g_rw_lock_writer_unlock (&gstate.context_lock);

@@ -73,8 +73,12 @@ typedef struct _nvmi_task_info
 	unsigned long refct;
 
 	// If not 0, this is the request ID from NBrain that asked for the death of this process
-	uint64_t   pending_kill_request_id;
+	uint64_t       pending_kill_request_id;
 	unsigned long kill_attempts;
+	unsigned long events_since_trigger;
+
+	bool triggered; // caused current switch to ACTIVE view
+	unsigned long trigger_event_limit;
 } nvmi_task_info_t;
 
 
