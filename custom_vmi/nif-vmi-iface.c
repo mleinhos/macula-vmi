@@ -643,11 +643,16 @@ nif_enable_monitor (addr_t kva,
 		g_hash_table_insert (xa.pframe_sframe_mappings,
 				     GSIZE_TO_POINTER(orig_frame), GSIZE_TO_POINTER(shadow_frame));
 	}
-
+#if defined(ARM64)
+	else
+	{
+		shadow_frame_ss	= shadow_frame + 1;
+	}
+#endif
 	// shadow_frame is now known
 	clog_debug (CLOG(CLOGGER_ID), "shadow_frame %lx for va %lx", shadow_frame, kva);
 
-	pgnode = g_hash_table_lookup(xa.shadow_pnode_mappings, GSIZE_TO_POINTER(shadow_frame));
+	pgnode = g_hash_table_lookup (xa.shadow_pnode_mappings, GSIZE_TO_POINTER(shadow_frame));
 	if (NULL == pgnode)
 	{
 		// Copy orig frame into shadow
