@@ -75,11 +75,13 @@ static nvmi_cb_info_t
 nvmi_special_cbs[] =
 {
 #define NVMI_DO_EXIT_IDX 0
-	{ .cb_type = NVMI_CALLBACK_SPECIAL, .name = "do_exit", .state = {.inv_cache = 1}, .argct = 0 },
+	{ .cb_type = NVMI_CALLBACK_SPECIAL, .name = "do_exit",
+	  .state = {.inv_cache = 1, .trigger_off = 1} },
 #define NVMI_FD_INSTALL_IDX 1
 	{ .cb_type = NVMI_CALLBACK_SPECIAL, .name = "fd_install", .argct = 6 },
 #define NVMI_DO_FORK_IDX 2
-	{ .cb_type = NVMI_CALLBACK_SPECIAL, .name = "_do_fork", .state = {.inv_cache = 1}, },
+	{ .cb_type = NVMI_CALLBACK_SPECIAL, .name = "_do_fork",
+	  .state = {.inv_cache = 1}, },
 };
 
 
