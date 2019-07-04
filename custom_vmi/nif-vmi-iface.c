@@ -1128,14 +1128,20 @@ nif_event_loop_worker (void * arg)
 	clog_info (CLOG(CLOGGER_ID), "Entering VMI event loop: resuming VM");
 	vmi_resume_vm (xa.vmi);
 
-	while (!xa.interrupted) {
+	while (!xa.interrupted)
+	{
 		status_t status = vmi_events_listen (xa.vmi, 500);
-		if (status != VMI_SUCCESS) {
+		if (status != VMI_SUCCESS)
+		{
 			clog_error (CLOG(CLOGGER_ID), "Some issue in the event_listen loop. Aborting!");
 			xa.interrupted = true;
 			rc = EBUSY;
 		}
 	}
+
+	// Lock all callbacks out, flush events
+	allow_callbacks (false);
+	(void) vmi_events_listen (xa.vmi, 50);
 
 	vmi_pause_vm (xa.vmi);
 
@@ -1165,11 +1171,15 @@ nif_fini(void)
 
 	fflush (stdout);
 
-	if (NULL != xa.shadow_pnode_mappings) {
+	if (NULL != xa.shadow_pnode_mappings)
+	{
 		g_hash_table_destroy (xa.shadow_pnode_mappings);
+		xa.shadow_pnode_mappings = NULL;
 	}
-	if (NULL != xa.pframe_sframe_mappings) {
+	if (NULL != xa.pframe_sframe_mappings)
+	{
 		g_hash_table_destroy (xa.pframe_sframe_mappings);
+		xa.pframe_sframe_mappings = NULL;
 	}
 
 	destroy_views();
@@ -1300,9 +1310,6 @@ nif_get_vmi (vmi_instance_t * vmi)
 void
 nif_stop (void)
 {
-	// Lock all callbacks out
-	allow_callbacks (false);
-
 	// Called via signal handler; don't block
 	xa.interrupted = true;
 
