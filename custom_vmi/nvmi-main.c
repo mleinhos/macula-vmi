@@ -75,8 +75,9 @@ static nvmi_cb_info_t
 nvmi_special_cbs[] =
 {
 #define NVMI_DO_EXIT_IDX 0
+	// Included in trigger view, and also removes task from trigger consideration
 	{ .cb_type = NVMI_CALLBACK_SPECIAL, .name = "do_exit",
-	  .state = {.inv_cache = 1, .trigger_off = 1} },
+	  .state = {.inv_cache = 1, .trigger = 1, .trigger_off = 1} },
 #define NVMI_FD_INSTALL_IDX 1
 	{ .cb_type = NVMI_CALLBACK_SPECIAL, .name = "fd_install", .argct = 6 },
 #define NVMI_DO_FORK_IDX 2
@@ -904,9 +905,12 @@ static inline void
 cb_update_trigger_state (nvmi_cb_info_t * cbi,
 			 nvmi_task_info_t * task)
 {
-	// Sanity check: Can do neither in one CB, but can't do both!
-	assert ((!cbi->state.trigger && !cbi->state.trigger_off) ||
-		cbi->state.trigger != cbi->state.trigger_off);
+	// N.B. An event can both cause and deactivate a trigger. Handle appropriately
+	bool task_untriggered = false;
+	nvmi_level_t new_level = NVMI_MONITOR_LEVEL_UNSET;
+
+	// A non-triggering CB: track stats, switch back to TRIGGER view if needed
+	unsigned long ct = atomic_inc (&task->events_since_trigger);
 
 	assert (task->trigger_event_limit > 0);
 
@@ -917,38 +921,49 @@ cb_update_trigger_state (nvmi_cb_info_t * cbi,
 		{
 			clog_info (CLOG(CLOGGER_ID),
 				   "Initiating trigger: event %s proc %s", cbi->name, task->comm);
-
-			nif_set_level (NVMI_MONITOR_LEVEL_ACTIVE);
-			gstate.level = NVMI_MONITOR_LEVEL_ACTIVE;
+			new_level = NVMI_MONITOR_LEVEL_ACTIVE;
 			atomic_inc (&gstate.triggered_procs);
 			task->triggered = true;
 		}
 		task->events_since_trigger = 0;
 	}
-	else
+
+	// Now test whether this event makes the level drop back down
+	if (ct == task->trigger_event_limit)
 	{
-		// A non-triggering CB: track stats, switch back to TRIGGER view if needed
-		unsigned long ct = atomic_inc (&task->events_since_trigger);
+		clog_warn (CLOG(CLOGGER_ID), "Saw over threshold of events (%d)",
+			   task->trigger_event_limit);
+		task_untriggered = true;
+	}
 
-		if (ct > task->trigger_event_limit || cbi->state.trigger_off)
+	// Other possibility: this event causes task to untrigger (e.g. process death)
+	if (cbi->state.trigger_off)
+	{
+		clog_warn (CLOG(CLOGGER_ID), "Event untriggers task");
+		change = true;
+		new_level = NVMI_MONITOR_LEVEL_TRIGGERS;
+		task_untriggered = true;
+	}
+
+	if (task_untriggered)
+	{
+		unsigned long pct = atomic_dec (&gstate.triggered_procs);
+		clog_info (CLOG(CLOGGER_ID),
+			   "Dropping trigger: event %s proc %s", cbi->name, task->comm);
+		task->triggered = false;		
+		task->events_since_trigger = 0;
+
+		if (0 == pct)
 		{
-			unsigned long pct = atomic_dec (&gstate.triggered_procs);
-
-			clog_warn (CLOG(CLOGGER_ID),
-				   "Saw over threshold of events, or event untriggers");
-
-			task->triggered = false;
-			task->events_since_trigger = 0;
-
-			clog_info (CLOG(CLOGGER_ID),
-				   "Dropping trigger: event %s proc %s", cbi->name, task->comm);
-
-			if (0 == pct)
-			{
-				nif_set_level (NVMI_MONITOR_LEVEL_TRIGGERS);
-				gstate.level = NVMI_MONITOR_LEVEL_TRIGGERS;
-			}
+			clog_warn (CLOG(CLOGGER_ID), "No triggered processes remain");
+			new_level = NVMI_MONITOR_LEVEL_TRIGGERS;
 		}
+	}
+	
+	if (NVMI_MONITOR_LEVEL_UNSET != new_level)
+	{
+		nif_set_level (new_level);
+		gstate.level = new_level;
 	}
 }
 
