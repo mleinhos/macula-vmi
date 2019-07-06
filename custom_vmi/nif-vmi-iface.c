@@ -279,7 +279,7 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 {
 	nif_page_node* pgnode = NULL;
 	nif_hook_node* hook_node = NULL;
-	addr_t shadow = 0;
+	addr_t gpa = 0;
 
 	// If applicable, handle event from single step view.
 	if (event->slat_id == xa.ss_view)
@@ -310,15 +310,17 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 		return (VMI_EVENT_RESPONSE_VMM_PAGETABLE_ID);
 	}
 
-	// Otherwise this is the initial hook. Lookup the GFN -- do we know about it?
-	hook_node = g_hash_table_lookup (xa.gpa_hook_mappings,
-					 GSIZE_TO_POINTER(MKADDR(event->interrupt_event.gfn,
-								 event->interrupt_event.offset)));
+	// Otherwise this is the initial hook. Lookup the GFN -- do we
+	// know about it? Note that another field is available in the
+	// event: gla, giving the KVA where the event occured.
+
+	gpa = MKADDR(event->interrupt_event.gfn, event->interrupt_event.offset);
+	hook_node = g_hash_table_lookup (xa.gpa_hook_mappings, GSIZE_TO_POINTER(gpa));
+
 	xa.vcpu_hook_nodes [event->vcpu_id] = hook_node;
 	if (NULL == hook_node)
 	{
-		nvmi_error ("No BP record found for this offset %" PRIx64 " on page %" PRIx64 "",
-			    event->privcall_event.offset, event->privcall_event.gfn);
+		nvmi_error ("No BP record found for this GPA %" PRIx64 ".", gpa);
 		return VMI_EVENT_RESPONSE_NONE;
 	}
 
@@ -367,18 +369,16 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 {
 	nif_page_node* pgnode = NULL;
 	nif_hook_node* hook_node = NULL;
-	addr_t shadow = 0;
+	addr_t gpa = 0;
 
 	// lookup the gfn -- do we know about it?
-	hook_node = g_hash_table_lookup (xa.gpa_hook_mappings,
-					 GSIZE_TO_POINTER(MKADDR(event->interrupt_event.gfn,
-								 event->interrupt_event.offset)));
+	gpa = MKADDR(event->interrupt_event.gfn, event->interrupt_event.offset);
+	hook_node = g_hash_table_lookup (xa.gpa_hook_mappings, GSIZE_TO_POINTER(gpa));
 
 	xa.vcpu_hook_nodes [event->vcpu_id] = hook_node;
 	if (NULL == hook_node)
 	{
-		nvmi_error ("No BP record found for this offset %" PRIx64 " on page %" PRIx64 ", reinjecting.",
-			    event->interrupt_event.offset, event->interrupt_event.gfn);
+		nvmi_error ("No BP record found for this GPA %" PRIx64 ".", gpa);
 		event->interrupt_event.reinject = 1;
 		return VMI_EVENT_RESPONSE_NONE;
 	}
@@ -424,6 +424,27 @@ free_nif_page_node (gpointer data)
 
 	if (NULL != pnode->offset_bp_mappings)
 	{
+		GList * hooks = g_hash_table_get_values (pnode->offset_bp_mappings);
+		GList * ihook = NULL;
+
+		for (ihook = hooks; ihook != NULL; ihook = ihook->next)
+		{
+			nif_hook_node * node = (nif_hook_node *) ihook->data;
+			addr_t gpa = MKADDR (pnode->orig_frame, node->offset);
+
+			if (g_hash_table_contains (xa.gpa_hook_mappings, GSIZE_TO_POINTER(gpa)))
+			{
+				//nvmi_debug ("gpa->hook mapping: removing %s", node->name);
+				g_hash_table_remove (xa.gpa_hook_mappings, GSIZE_TO_POINTER(gpa));
+			}
+			else
+			{
+				nvmi_warn ("gpa->hook mapping doesn't contain GPA %" PRIX64,
+					   GSIZE_TO_POINTER(gpa));
+			}
+		}
+		g_list_free (hooks);
+
 		g_hash_table_destroy(pnode->offset_bp_mappings);
 	}
 
@@ -433,12 +454,12 @@ free_nif_page_node (gpointer data)
 			  VMI_MEMACCESS_N,
 			  xa.active_view);
 
-//	xc_altp2m_change_gfn (xa.xci, xa.domain_id, xa.active_view, pnode->frame, ALTP2M_DEFAULT_GFN);
 	xc_altp2m_change_gfn (xa.xci, xa.domain_id, xa.active_view, pnode->shadow_frame, ALTP2M_DEFAULT_GFN);
 	xc_domain_decrease_reservation_exact (xa.xci,
 					      xa.domain_id,
 					      1, 0,
 					      (xen_pfn_t*)&pnode->shadow_frame);
+
 #if defined(ARM64)
 	xc_altp2m_change_gfn (xa.xci, xa.domain_id, xa.active_view, pnode->shadow_frame_ss, ALTP2M_DEFAULT_GFN);
 	xc_domain_decrease_reservation_exact (xa.xci,
@@ -471,41 +492,10 @@ nif_is_monitored(addr_t kva, bool * monitored)
 		nvmi_error ("Failed to find PA for kernel VA=%" PRIx64 "", kva);
 		goto exit;
 	}
-/*
-	status = vmi_translate_kv2p (xa.vmi, kva, &pa);
-	if (VMI_SUCCESS != status)
-	{
-		rc = EINVAL;
-		nvmi_error ("Failed to find PA for VA=%" PRIx64 "", kva);
-		goto exit;
-	}
-*/
-	frame = pa >> PG_OFFSET_BITS;
-	offset = pa % DOM_PAGE_SIZE;
 
-	shadow_frame = (addr_t) GPOINTER_TO_SIZE (
-		g_hash_table_lookup (xa.pframe_sframe_mappings, GSIZE_TO_POINTER(frame)));
+	hook_node = g_hash_table_lookup (xa.gpa_hook_mappings, GSIZE_TO_POINTER(pa));
 
-	if (0 == shadow_frame)
-	{
-		goto exit;
-	}
-
-	pgnode = g_hash_table_lookup(xa.shadow_pnode_mappings,
-				     GSIZE_TO_POINTER(shadow_frame));
-	if (NULL == pgnode)
-	{
-		goto exit;
-	}
-
-	hook_node = g_hash_table_lookup(pgnode->offset_bp_mappings,
-					GSIZE_TO_POINTER(offset));
-	if (NULL == hook_node)
-	{
-		goto exit;
-	}
-
-	*monitored = true;
+	*monitored = (NULL != hook_node);
 
 exit:
 	return rc;
@@ -603,12 +593,11 @@ nif_enable_monitor (addr_t kva,
 		g_hash_table_insert (xa.pframe_sframe_mappings,
 				     GSIZE_TO_POINTER(orig_frame), GSIZE_TO_POINTER(shadow_frame));
 	}
-#if defined(ARM64)
 	else
 	{
-		shadow_frame_ss	= shadow_frame + 1; // must be valid below...
+		shadow_frame_ss	= shadow_frame + 1; // Used only on ARM
 	}
-#endif
+
 	// shadow_frame is now known
 	nvmi_debug ("shadow_frame %lx for va %lx", shadow_frame, kva);
 
@@ -645,7 +634,7 @@ nif_enable_monitor (addr_t kva,
 		// Update the hks list
 		pgnode                  = g_new0(nif_page_node, 1);
 		pgnode->shadow_frame    = shadow_frame;
-		pgnode->shadow_frame_ss = shadow_frame_ss; // Intel: this is 0
+		pgnode->shadow_frame_ss = shadow_frame_ss; // Intel: this is ignored
 		pgnode->orig_frame      = orig_frame;
 		pgnode->offset_bp_mappings = g_hash_table_new_full (NULL, NULL, NULL, free_pg_hks_lst);
 
@@ -940,7 +929,7 @@ destroy_views (void)
 #define MAX_LOCK_BREAK_ATTEMPTS 3
 
 static void
-break_lock (nif_hook_node * node)
+break_hook_lock (nif_hook_node * node)
 {
 	int tries = 0;
 	while (tries++ < MAX_LOCK_BREAK_ATTEMPTS)
@@ -1001,7 +990,7 @@ allow_callbacks (bool allowed)
 				node->wlocked = g_rw_lock_writer_trylock (&node->lock);
 				if (!node->wlocked)
 				{
-					break_lock (node);
+					break_hook_lock (node);
 				}
 			}
 		} // inner for
@@ -1131,9 +1120,11 @@ nif_event_loop_worker (void * arg)
 		}
 	}
 
-	// Lock all callbacks out, flush events
+	// Flush out events (which require read lock) before locking down callbacks with write lock
+	nvmi_info ("Flushing out final events...");
+	(void) vmi_events_listen (xa.vmi, 1000);
+	nvmi_info ("...done. All events should be completed.");
 	allow_callbacks (false);
-	(void) vmi_events_listen (xa.vmi, 50);
 
 	vmi_pause_vm (xa.vmi);
 

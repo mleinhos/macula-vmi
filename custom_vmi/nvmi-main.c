@@ -200,6 +200,8 @@ close_handler(int sig)
 	if (!gstate.interrupted)
 	{
 		gstate.interrupted = true;
+		(void) clog_set_level (CLOGGER_ID, CLOG_DEBUG);
+		nvmi_warn ("Set logging verbosity to DEBUG for teardown");
 		nif_stop();
 	}
 }
@@ -944,7 +946,7 @@ cb_update_trigger_state (nvmi_cb_info_t * cbi,
 	// Now test whether this event makes the level drop back down
 	if (ct == task->trigger_event_limit)
 	{
-		clog_warn (CLOG(CLOGGER_ID), "Saw over threshold of events (%d)",
+		clog_info (CLOG(CLOGGER_ID), "Saw over threshold of events (%d)",
 			   task->trigger_event_limit);
 		task_untriggered = true;
 	}
@@ -952,7 +954,7 @@ cb_update_trigger_state (nvmi_cb_info_t * cbi,
 	// Other possibility: this event causes task to untrigger (e.g. process death)
 	if (cbi->state.trigger_off)
 	{
-		clog_warn (CLOG(CLOGGER_ID), "Event untriggers task");
+		clog_info (CLOG(CLOGGER_ID), "Event untriggers task");
 		new_level = NVMI_MONITOR_LEVEL_TRIGGERS;
 		task_untriggered = true;
 	}
@@ -960,7 +962,7 @@ cb_update_trigger_state (nvmi_cb_info_t * cbi,
 	if (task_untriggered)
 	{
 		unsigned long pct = atomic_dec (&gstate.triggered_procs);
-		nvmi_warn ("Saw over threshold of events (task %s, count %d), or event (%s) untriggers",
+		nvmi_info ("Saw over threshold of events (task %s, count %d), or event (%s) untriggers",
 			   task->comm, ct, cbi->name);
 
 		task->triggered = false;
@@ -968,7 +970,7 @@ cb_update_trigger_state (nvmi_cb_info_t * cbi,
 
 		if (0 == pct)
 		{
-			nvmi_warn ("No triggered processes remain");
+			nvmi_info ("No triggered processes remain");
 			new_level = NVMI_MONITOR_LEVEL_TRIGGERS;
 		}
 	}
