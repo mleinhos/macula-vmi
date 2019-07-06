@@ -208,8 +208,7 @@ dump_cb_stats(void)
 		nvmi_cb_info_t * cbi = &nvmi_syscalls[i];
 		if (0 == cbi->hitct) continue;
 
-		nvmi_warn ("Called % 16d times: %s",
-			   cbi->hitct, cbi->name);
+		nvmi_warn ("Called % 16d times: %s", cbi->hitct, cbi->name);
 	}
 
 	for (int i = 0; i < NUMBER_OF(nvmi_special_cbs); ++i)
@@ -217,8 +216,7 @@ dump_cb_stats(void)
 		nvmi_cb_info_t * cbi = &nvmi_special_cbs[i];
 		if (0 == cbi->hitct) continue;
 
-		nvmi_warn ("Called % 16d times: %s",
-			   cbi->hitct, cbi->name);
+		nvmi_warn ("Called % 16d times: %s", cbi->hitct, cbi->name);
 	}
 	nvmi_warn ("Event count: %ld", gstate.event_id);
 	nvmi_warn ("*************** END STATISTICS ****************" );
@@ -740,8 +738,7 @@ read_user_mem (vmi_instance_t vmi,
 	}
 */
 	dtb = evt->task->task_dtb;
-	nvmi_debug ("PID %ld --> DTB %lx",
-		 evt->task->pid, dtb);
+	nvmi_debug ("PID %ld --> DTB %lx", evt->task->pid, dtb);
 
 	vmi_v2pcache_flush (vmi, dtb);
 	//vmi_v2pcache_flush (vmi,  ~0ull);
@@ -1188,7 +1185,7 @@ instrument_syscall (char *name, addr_t kva)
 
 	// Now, with or without the syscall def, monitor this syscall
 	nvmi_info ("#%d: Monitoring symbol %s at %" PRIx64 "",
-		 gstate.act_calls, name, kva);
+		   gstate.act_calls, name, kva);
 
 	// Stage syscall dynamically; name only
 	if (NULL == cbi) {

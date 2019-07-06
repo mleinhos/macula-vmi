@@ -11,7 +11,7 @@
 
 #include "nvmi-public-defs.h"
 
-// For clog
+// For logging (using clog)
 #define CLOGGER_ID  0
 
 #define nvmi_debug(...)  clog_debug(CLOG(CLOGGER_ID),  __VA_ARGS__)

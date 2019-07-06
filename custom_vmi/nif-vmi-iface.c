@@ -962,8 +962,7 @@ break_lock (nif_hook_node * node)
 		node->rlocked = false;
 		if (!g_rw_lock_writer_trylock (&node->lock))
 		{
-			nvmi_error (
-				    "Still can't acquire lock on node %s", node->name);
+			nvmi_error ("Still can't acquire lock on node %s", node->name);
 		}
 	}
 }
