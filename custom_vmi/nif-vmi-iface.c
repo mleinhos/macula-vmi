@@ -310,11 +310,8 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 		return (VMI_EVENT_RESPONSE_VMM_PAGETABLE_ID);
 	}
 
-	// Otherwise this is the initial hook. Lookup the GFN -- do we
-	// know about it? Note that another field is available in the
-	// event: gla, giving the KVA where the event occured.
-
-	gpa = MKADDR(event->interrupt_event.gfn, event->interrupt_event.offset);
+	// Otherwise this is the initial hook. Lookup the guest physical addr.
+	gpa = MKADDR(event->privcall_event.gfn, event->privcall_event.offset);
 	hook_node = g_hash_table_lookup (xa.gpa_hook_mappings, GSIZE_TO_POINTER(gpa));
 
 	xa.vcpu_hook_nodes [event->vcpu_id] = hook_node;
@@ -338,9 +335,6 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 		goto exit;
 	}
 
-	// Since the trigger and active views share frames, sometimes
-	// we'll incur a notification in trigger view for a
-	// non-trigger CB. In that case, don't notify the user.
 	// Since the trigger and active views share frames, sometimes
 	// we'll incur a notification in trigger view for a
 	// non-trigger CB. In that case, don't notify the user.
@@ -371,7 +365,7 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 	nif_hook_node* hook_node = NULL;
 	addr_t gpa = 0;
 
-	// lookup the gfn -- do we know about it?
+	// Lookup the guest physical addr.
 	gpa = MKADDR(event->interrupt_event.gfn, event->interrupt_event.offset);
 	hook_node = g_hash_table_lookup (xa.gpa_hook_mappings, GSIZE_TO_POINTER(gpa));
 
