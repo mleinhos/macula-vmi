@@ -377,8 +377,7 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 	xa.vcpu_hook_nodes [event->vcpu_id] = hook_node;
 	if (NULL == hook_node)
 	{
-		nvmi_error (
-			    "No BP record found for this offset %" PRIx64 " on page %" PRIx64 ", reinjecting.",
+		nvmi_error ("No BP record found for this offset %" PRIx64 " on page %" PRIx64 ", reinjecting.",
 			    event->interrupt_event.offset, event->interrupt_event.gfn);
 		event->interrupt_event.reinject = 1;
 		return VMI_EVENT_RESPONSE_NONE;
@@ -1210,15 +1209,17 @@ nif_init(const char* name,
 
 	// Initialize the libvmi library.
 	if (VMI_FAILURE ==
-	    vmi_init_complete(&xa.vmi, (void*)name, VMI_INIT_DOMAINNAME| VMI_INIT_EVENTS,NULL,
-			      VMI_CONFIG_GLOBAL_FILE_ENTRY, NULL, NULL)) {
+	    vmi_init_complete(&xa.vmi, (void*)name, VMI_INIT_DOMAINNAME| VMI_INIT_EVENTS,
+			      NULL, VMI_CONFIG_GLOBAL_FILE_ENTRY, NULL, NULL))
+	{
 		rc = EIO;
 		nvmi_error ("Failed to init LibVMI library.");
 		goto exit;
 	}
 
 	rc = init_xen_monitor(name);
-	if (rc) {
+	if (rc)
+	{
 		goto exit;
 	}
 
@@ -1273,20 +1274,23 @@ nif_init(const char* name,
 	nvmi_info ("Altp2m: active_view created and activated");
 
 	status = vmi_pid_to_dtb (xa.vmi, 0, &xa.kdtb);
-	if (VMI_FAILURE == status) {
+	if (VMI_FAILURE == status)
+	{
 		rc = EIO;
 		nvmi_error ("Failed to find kernel page table base");
 		goto exit;
 	}
 
 	rc = sem_init (&xa.start_loop, 0, 0);
-	if (rc) {
+	if (rc)
+	{
 		nvmi_error ("sem_init() failed: %d", rc);
 		goto exit;
 	}
 
 	rc = sem_init (&xa.loop_complete, 0, 0);
-	if (rc) {
+	if (rc)
+	{
 		nvmi_error ("sem_init() failed: %d", rc);
 		goto exit;
 	}

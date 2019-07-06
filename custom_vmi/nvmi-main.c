@@ -153,16 +153,20 @@ logger_init (const char * logfile,
 {
 	int rc = 0;
 
-	if (logfile) {
+	if (logfile)
+	{
 		fprintf (stderr, "Initializing logging to %s, verbosity=%d\n",
 			 logfile, verbosity_level);
 		rc =  clog_init_path (CLOGGER_ID, logfile);
-	} else {
+	}
+	else
+	{
 		fprintf (stderr, "Initializing logging to stderr, verbosity=%d\n",
 			 verbosity_level);
 		rc = clog_init_fd (CLOGGER_ID, fileno(stderr));
 	}
-	if (rc) {
+	if (rc)
+	{
 		fprintf (stderr, "Logger initialization failure\n");
 		goto exit;
 	}
@@ -192,7 +196,8 @@ static void
 close_handler(int sig)
 {
 	nvmi_info ("Received notification to stop (%d), shutting down", sig);
-	if (!gstate.interrupted) {
+	if (!gstate.interrupted)
+	{
 		gstate.interrupted = true;
 		nif_stop();
 	}
@@ -233,12 +238,14 @@ cb_gather_registers (vmi_instance_t vmi,
 	status_t status = VMI_SUCCESS;
 	reg_t x[8];
 
-	for (int i = 0; i < argct; ++i) {
+	for (int i = 0; i < argct; ++i)
+	{
 		status_t status = vmi_get_vcpureg (vmi,
 						   &regs->syscall_args[i],
 						   nvmi_syscall_arg_regs[i],
 						   event->vcpu_id);
-		if (VMI_FAILURE == status) {
+		if (VMI_FAILURE == status)
+		{
 			rc = EIO;
 			goto exit;
 		}
@@ -254,7 +261,8 @@ cb_gather_registers (vmi_instance_t vmi,
 	regs->x86.r = *(event->x86_regs);
 	status = vmi_get_vcpureg (vmi, &regs->x86.sp, RSP, event->vcpu_id);
 #endif
-	if (VMI_SUCCESS != status) {
+	if (VMI_SUCCESS != status)
+	{
 		rc = EFAULT;
 		nvmi_warn ("vmi_get_vcpureg() failed");
 		goto exit;
@@ -267,7 +275,8 @@ cb_gather_registers (vmi_instance_t vmi,
 	status |= vmi_get_vcpureg (vmi, &regs->arm.r.sp,     SP_USR, event->vcpu_id);
 	status |= vmi_get_vcpureg (vmi, &regs->arm.r.sp_el0, SP_EL0, event->vcpu_id);
 
-	for (int i = 0; i < NUMBER_OF(x); ++i) {
+	for (int i = 0; i < NUMBER_OF(x); ++i)
+{
 		(void) vmi_get_vcpureg (vmi, &x[i], R0+i, event->vcpu_id);
 		nvmi_debug ("R%d = 0x%lx", i, x[i]);
 	}
@@ -287,7 +296,8 @@ cb_gather_registers (vmi_instance_t vmi,
 	status |= vmi_get_vcpureg (vmi, &regs->intel.sp,      RSP,     event->vcpu_id);
 	status |= vmi_get_vcpureg (vmi, &regs->intel.gs_base, GS_BASE, event->vcpu_id);
 #endif
-	if (VMI_SUCCESS != status) {
+	if (VMI_SUCCESS != status)
+	{
 		rc = EFAULT;
 		nvmi_warn ("vmi_get_vcpureg() failed");
 		goto exit;
@@ -308,7 +318,8 @@ deref_task_context (gpointer arg)
 	atomic_t val = 	atomic_dec (&tinfo->refct);
 	assert (val >= 0);
 
-	if (0 == val) {
+	if (0 == val)
+	{
 		nvmi_info ("**** Process pid=%ld comm=%s destroyed ****",
 			 tinfo->pid, tinfo->comm);
 		g_slice_free (nvmi_task_info_t, tinfo);
@@ -347,7 +358,8 @@ cb_current_pid  (vmi_instance_t vmi,
 				  regs->x86.r.gs_base + gstate.va_current_task,
 				  0,
 				  &local_curr);
-	if (VMI_SUCCESS != status) {
+	if (VMI_SUCCESS != status)
+	{
 		rc = EIO;
 		nvmi_warn ("Failed to determine current task (from gs_base=%p + curr_task_offset=%p)",
 			   regs->x86.r.gs_base + gstate.va_current_task);
@@ -357,7 +369,8 @@ cb_current_pid  (vmi_instance_t vmi,
 
 	// Get current->pid
 	status = vmi_read_32_va(vmi, local_curr + gstate.task_pid_ofs, 0, &local_pid);
-	if (VMI_FAILURE == status) {
+	if (VMI_FAILURE == status)
+	{
 		rc = EFAULT;
 		nvmi_warn ("Failed to read task's pid at %" PRIx64 " + %lx",
 			   local_curr, gstate.task_pid_ofs);
@@ -393,7 +406,8 @@ cb_current_task (vmi_instance_t vmi,
 				curr_task + gstate.task_pid_ofs,
 				0,
 				&(*tinfo)->pid);
-	if (VMI_FAILURE == status) {
+	if (VMI_FAILURE == status)
+	{
 		rc = EFAULT;
 		nvmi_warn ("Failed to read task's pid at %" PRIx64 " + %lx",
 			 (*tinfo)->task_struct, gstate.task_pid_ofs);
@@ -410,7 +424,8 @@ cb_current_task (vmi_instance_t vmi,
 					   regs->x86.r.gs_base + gstate.va_current_task,
 					   0,
 					   task);
-	if (VMI_SUCCESS != status) {
+	if (VMI_SUCCESS != status)
+	{
 		rc = EIO;
 		task = NULL;
 		nvmi_warn ("Failed to determine current task (from gs_base + curr_task_offset)");
@@ -454,7 +469,8 @@ cb_build_task_context (vmi_instance_t vmi,
 				curr_task + gstate.task_pid_ofs,
 				0,
 				&(*tinfo)->pid);
-	if (VMI_FAILURE == status) {
+	if (VMI_FAILURE == status)
+	{
 		rc = EFAULT;
 		nvmi_warn ("Failed to read task's pid at %" PRIx64 " + %lx",
 			 (*tinfo)->task_struct, gstate.task_pid_ofs);
@@ -467,7 +483,8 @@ cb_build_task_context (vmi_instance_t vmi,
 	// Get current->comm
 	// TODO: This is wrong
 	pname = vmi_read_str_va (vmi, curr_task + gstate.task_name_ofs, 0);
-	if (NULL == pname) {
+	if (NULL == pname)
+	{
 		rc = EFAULT;
 		nvmi_warn ("Failed to read task's comm at %" PRIx64 " + %lx",
 			 (*tinfo)->task_struct, gstate.task_name_ofs);
@@ -487,7 +504,8 @@ cb_build_task_context (vmi_instance_t vmi,
 
 	// Read current->mm
 	status = vmi_read_addr_va (vmi, curr_task + gstate.task_mm_ofs, 0, &task_mm);
-	if (VMI_FAILURE == status) {
+	if (VMI_FAILURE == status)
+	{
 		rc = EIO;
 		nvmi_warn ("Failed to read current->mm");
 		goto exit;
@@ -495,7 +513,8 @@ cb_build_task_context (vmi_instance_t vmi,
 
 	// Read current->mm->pgd: Yields wrong result on ARM
 	status = vmi_read_addr_va (vmi, task_mm + gstate.mm_pgd_ofs, 0, &(*tinfo)->task_dtb);
-	if (VMI_FAILURE == status) {
+	if (VMI_FAILURE == status)
+	{
 		rc = EIO;
 		nvmi_warn ("Failed to read mm->pgd");
 		goto exit;
@@ -533,15 +552,16 @@ cb_build_task_context (vmi_instance_t vmi,
 	*/
 
 	status = vmi_pid_to_dtb (vmi, (*tinfo)->pid, &(*tinfo)->task_dtb);
-	if (VMI_FAILURE == status) {
+	if (VMI_FAILURE == status)
+	{
 		rc = EIO;
 		nvmi_warn ("Failed to find page base for task, pid=%ld",
-			 (*tinfo)->pid);
+			   (*tinfo)->pid);
 		goto exit;
 	}
 	nvmi_debug ("vmi_pid_to_dtb: PID %d --> dtb %lx",
-		 (uint32_t) (*tinfo)->pid,
-		 (*tinfo)->task_dtb);
+		    (uint32_t) (*tinfo)->pid,
+		    (*tinfo)->task_dtb);
 
 #endif
 	nvmi_debug ("Build context: task=%lx (key) pid=%d comm=%s",
@@ -979,7 +999,8 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 
 		//nvmi_debug ("Syscall processing arg %d, val=%lx", i, val);
 
-		switch (cbi->args[i].type) {
+		switch (cbi->args[i].type)
+		{
 		case NVMI_ARG_TYPE_SCALAR:
 		case NVMI_ARG_TYPE_PVOID:
 		case NVMI_ARG_TYPE_POLLFD:
@@ -999,7 +1020,8 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 			free (buf);
 			dataofs += evt->arg_lens[i];
 			break;
-		case NVMI_ARG_TYPE_SA: {
+		case NVMI_ARG_TYPE_SA:
+		{
 #if 0
 			struct addrinfo_in6 ai;
 			struct addrinfo *res;
@@ -1117,21 +1139,26 @@ instrument_syscall (char *name, addr_t kva)
 	static bool prediscovery = false;
 	static size_t nvmi_syscall_new = 0; // where to put new (incomplete) entries into table?
 
-	if (!prediscovery) {
+	if (!prediscovery)
+	{
 		prediscovery = true;
-		for (int i = 0; i < NUMBER_OF(nvmi_syscalls); ++i) {
-			if (strlen(nvmi_syscalls[i].name) > 0) {
+		for (int i = 0; i < NUMBER_OF(nvmi_syscalls); ++i)
+		{
+			if (strlen(nvmi_syscalls[i].name) > 0)
+			{
 				++nvmi_syscall_new;
 			}
 		}
 	}
 
 	// SyS --> sys
-	for (int i = 0; i < 3; ++i) {
+	for (int i = 0; i < 3; ++i)
+	{
 		name[i] = (char) tolower(name[i]);
 	}
 
-	if (strncmp (name, "sys_", 4)) {
+	if (strncmp (name, "sys_", 4))
+	{
 		// mismatch
 		rc = ENOENT;
 		goto exit;
@@ -1159,25 +1186,30 @@ instrument_syscall (char *name, addr_t kva)
 
 	// Bail if we're already monitoring that point
 	rc = nif_is_monitored (kva, &monitored);
-	if (rc) {
+	if (rc)
+	{
 		goto exit;
 	}
 
-	if (monitored) {
+	if (monitored)
+	{
 		nvmi_info ("KVA %" PRIx64 " is alraedy monitored", kva);
 		goto exit;
 	}
 
 	gstate.act_calls++;
-	if (gstate.act_calls == NVMI_MAX_SYSCALL_CT-1) { // max syscalls that we want to monitor
+	if (gstate.act_calls == NVMI_MAX_SYSCALL_CT-1)  // max syscalls that we want to monitor
+	{
 		rc = ENOSPC;
 		nvmi_info ("Exceeding max allowed syscalls. Halting search.");
 		goto exit;
 	}
 
 	// We've found a syscall, and we have its address. Now, find it in our syscall table
-	for (int i = 0; i < nvmi_syscall_new; ++i) { //NUMBER_OF(nvmi_syscalls); ++i) {
-		if (!strcmp(name, nvmi_syscalls[i].name)) {
+	for (int i = 0; i < nvmi_syscall_new; ++i)
+	{
+		if (!strcmp(name, nvmi_syscalls[i].name))
+		{
 			cbi = &nvmi_syscalls[i];
 			break;
 		}
@@ -1188,7 +1220,8 @@ instrument_syscall (char *name, addr_t kva)
 		   gstate.act_calls, name, kva);
 
 	// Stage syscall dynamically; name only
-	if (NULL == cbi) {
+	if (NULL == cbi)
+	{
 		nvmi_info ("monitoring syscall %s without a template", name);
 		cbi = &nvmi_syscalls[nvmi_syscall_new++];
 		cbi->cb_type = NVMI_CALLBACK_SYSCALL;
@@ -1196,13 +1229,15 @@ instrument_syscall (char *name, addr_t kva)
 		strncpy (cbi->name, name, SYSCALL_MAX_NAME_LEN);
 	}
 
-	if (!cbi->state.enabled) {
+	if (!cbi->state.enabled)
+	{
 		rc = ENOENT; // not quite right
 		goto exit;
 	}
 
 	rc = nif_enable_monitor (kva, name, cb_pre_instr_pt, NULL /*cb_post_instr_pt*/, cbi, cbi->state.trigger);
-	if (rc) {
+	if (rc)
+	{
 		nvmi_warn ("Failed to add pg/bp for %s at %" PRIx64 "", name, kva);
 		goto exit;
 	}
@@ -1223,13 +1258,15 @@ set_instrumentation_points (const char* mappath)
 	int rc = 0;
 
 	input_file = fopen(mappath, "r+");
-	if (NULL == input_file) {
+	if (NULL == input_file)
+	{
 		rc = EINVAL;
 		nvmi_warn ("Can't open system map file '%s'", mappath);
 		goto exit;
 	}
 
-	while (fgets( one_line, sizeof(one_line), input_file) != NULL) {
+	while (fgets( one_line, sizeof(one_line), input_file) != NULL)
+	{
 		char * name = NULL;
 		addr_t kva = 0;
 
@@ -1252,18 +1289,24 @@ set_instrumentation_points (const char* mappath)
 		//if (0 == strcmp("sys_sendmsg", name)) { __asm__("int $3");}
 
 		rc = instrument_special_point (name, kva);
-		if (0 == rc) { // success
-			continue;
-		} else if (ENOENT != rc) {
+		if (0 == rc)
+		{
+			continue; // success
+		}
+		else if (ENOENT != rc)
+		{
 			// failure for reason other than line mismatch
 			goto exit;
 		}
 
 		// Otherwise, try to match with a syscall
 		rc = instrument_syscall (name, kva);
-		if (0 == rc) { // success
-			continue;
-		} else if (ENOENT != rc) {
+		if (0 == rc)
+		{
+			continue; // success
+		}
+		else if (ENOENT != rc)
+		{
 			// failure for reason other than line mismatch
 			goto exit;
 		}
@@ -1273,7 +1316,8 @@ set_instrumentation_points (const char* mappath)
 	rc = 0;
 
 exit:
-	if (NULL != input_file) {
+	if (NULL != input_file)
+	{
 		fclose(input_file);
 	}
 
@@ -1332,7 +1376,8 @@ consume_special_event (nvmi_event_t * evt)
 		event_ready = true;
 
 		// Did brain ask for this destruction?
-		if (evt->task->pending_kill_request_id) {
+		if (evt->task->pending_kill_request_id)
+		{
 			response_t res = {0};
 			res.id = htobe64 (evt->task->pending_kill_request_id);
 			res.status = htobe32 (0);
@@ -1340,7 +1385,8 @@ consume_special_event (nvmi_event_t * evt)
 			nvmi_info ("Kill of process pid=%d succeeded", evt->task->pid);
 
 			rc = zmq_send (gstate.zmq_request_socket, &res, sizeof(res), 0);
-			if (rc < 0) {
+			if (rc < 0)
+			{
 				rc = errno;
 				nvmi_warn ("zmq_send() failed: %d", rc);
 			}
@@ -1379,7 +1425,8 @@ consume_special_event (nvmi_event_t * evt)
 	{
 		event.len = htobe32 (size);
 		rc = zmq_send (gstate.zmq_event_socket, &event, size, 0);
-		if (rc < 0) {
+		if (rc < 0)
+		{
 			nvmi_warn ("zmq_send() failed: %d", zmq_errno());
 		}
 	}
@@ -1415,10 +1462,12 @@ consume_syscall_event (nvmi_event_t * evt)
 	strncpy (event.u.syscall.name, cbi->name, sizeof(event.u.syscall.name));
 	event.u.syscall.arg_ct = htobe32 (cbi->argct);
 
-	for (int i = 0; i < cbi->argct; ++i) {
+	for (int i = 0; i < cbi->argct; ++i)
+	{
 		reg_t val = evt->r.syscall_args[i];
 
-		switch (cbi->args[i].type) {
+		switch (cbi->args[i].type)
+		{
 		case NVMI_ARG_TYPE_STR: { // char *
 			uint8_t * bytes = &(evt->mem[ evt->mem_ofs[i] ]);
 			size_t len = MIN (evt->arg_lens[i], sizeof(event.u.syscall.data) - dataofs);
@@ -1448,7 +1497,8 @@ consume_syscall_event (nvmi_event_t * evt)
 		}
 
 #if 0
-		case NVMI_ARG_TYPE_SA: {
+		case NVMI_ARG_TYPE_SA:
+		{
 
 			struct addrinfo_in6 ai;
 			struct addrinfo *res;
@@ -1459,13 +1509,15 @@ consume_syscall_event (nvmi_event_t * evt)
 					      sizeof(ai),
 					      &ai,
 					      NULL);
-			if (VMI_FAILURE == status ) {
+			if (VMI_FAILURE == status )
+			{
 				nvmi_warn ("Failed to read addrinfo struct");
 				continue;
 			}
 
 			rc = getaddrinfo (NULL, NULL, (const struct addrinfo *) &ai, &res);
-			if (rc) {
+			if (rc)
+			{
 				nvmi_warn ("Failed to decode addrinfo struct");
 				continue;
 			}
@@ -1566,10 +1618,12 @@ nvmi_event_consumer (gpointer data)
 	g_async_queue_ref (gstate.event_queue);
 
 	// Monitor gstate.interrupted
-	while (!gstate.interrupted || gstate.nif_busy) {
+	while (!gstate.interrupted || gstate.nif_busy)
+	{
 		nvmi_event_t * evt = (nvmi_event_t *)
 			g_async_queue_timeout_pop (gstate.event_queue, NVMI_EVENT_QUEUE_TIMEOUT_uS);
-		if (NULL == evt) {
+		if (NULL == evt)
+		{
 			// Nothing in queue. Is it time to return yet?
 			continue;
 		}
@@ -1605,7 +1659,8 @@ exit:
 
 	// Event socket
 	nvmi_info ("Closing event socket");
-	if (gstate.zmq_event_socket) {
+	if (gstate.zmq_event_socket)
+	{
 		zmq_close (gstate.zmq_event_socket);
 	}
 	gstate.zmq_event_socket  = NULL;
@@ -1619,22 +1674,19 @@ static void
 nvmi_main_fini (void)
 {
 	// FIXME:
-	if (gstate.consumer_thread) {
+	if (gstate.consumer_thread)
+	{
 		nvmi_info ("Giving consumer thread time to leave.");
 		//g_thread_join (gstate.consumer_thread);
 		//usleep(1);
 		nvmi_info ("Consumer thread joined");
 		gstate.consumer_thread = NULL;
 	}
-/*
-	// releasing queue causes event consumer to return
-	if (gstate.event_queue) {
-		//g_async_queue_unref (gstate.event_queue);
-		//gstate.event_queue = NULL;
-	}
-	nvmi_info ("Event queue dereferenced");
-*/
-	if (gstate.context_lookup) {
+
+	// N.B. releasing queue causes event consumer to return
+
+	if (gstate.context_lookup)
+	{
 		g_rw_lock_writer_lock (&gstate.context_lock);
 
 		g_hash_table_destroy (gstate.context_lookup);
@@ -1664,7 +1716,8 @@ nvmi_main_init (void)
 	sigaction(SIGALRM, &gstate.act, NULL);
 
 	rc = nif_get_vmi (&vmi);
-	if (rc) {
+	if (rc)
+	{
 		goto exit;
 	}
 
@@ -1680,7 +1733,8 @@ nvmi_main_init (void)
 	status |= vmi_get_kernel_struct_offset (vmi, "task_struct", "mm",   &gstate.task_mm_ofs);
 	status |= vmi_get_kernel_struct_offset (vmi, "mm_struct",   "pgd",  &gstate.mm_pgd_ofs);
 
-	if (VMI_FAILURE == status) {
+	if (VMI_FAILURE == status)
+	{
 		nvmi_warn ("Failed to get offset");
 		rc = EIO;
 		goto exit;
@@ -1692,11 +1746,13 @@ nvmi_main_init (void)
 
 #if !defined(ARM64)
 	status = vmi_translate_ksym2v(vmi, "per_cpu__current_task", &gstate.va_current_task);
-	if (VMI_FAILURE == status) {
+	if (VMI_FAILURE == status)
+	{
 		status = vmi_translate_ksym2v(vmi, "current_task", &gstate.va_current_task);
 	}
 
-	if (VMI_FAILURE == status) {
+	if (VMI_FAILURE == status)
+	{
 		rc = EIO;
 		nvmi_warn ("Error could get the current_task offset.");
 		goto exit;
@@ -1750,7 +1806,8 @@ comms_request_servicer (gpointer data)
 
 			// Set global killpid: now syscall hook will watch for this pid
 			rc = find_task_context_by_pid (req.arg1, &task);
-			if (rc) {
+			if (rc)
+			{
 				res.id = htobe64 (req.id);
 				res.status = htobe32 (rc);
 				response_created = true;
@@ -1776,7 +1833,8 @@ comms_request_servicer (gpointer data)
 		if (response_created)
 		{
 			rc = zmq_send (gstate.zmq_request_socket, &res, sizeof(res), 0);
-			if (rc < 0) {
+			if (rc < 0)
+			{
 				rc = errno;
 				nvmi_warn ("zmq_send() failed: %d", rc);
 			}
@@ -1788,7 +1846,8 @@ exit:
 
 	// Request socket
 	nvmi_info ("Closing request socket");
-	if (gstate.zmq_request_socket) {
+	if (gstate.zmq_request_socket)
+	{
 		zmq_close (gstate.zmq_request_socket);
 	}
 	gstate.zmq_request_socket  = NULL;
@@ -1800,14 +1859,16 @@ exit:
 static void
 comms_fini(void)
 {
-	if (!gstate.use_comms) {
+	if (!gstate.use_comms)
+	{
 		return;
 	}
 
 	nvmi_info ("Beginning comms shutdown");
 
 	// ZMQ context
-	if (gstate.zmq_context) {
+	if (gstate.zmq_context)
+	{
 		// Notify all threads using ZMQ comms to stop and
 		// close their respective sockets. zmq_term() waits
 		// for all sockets opened with given context to be
@@ -1820,7 +1881,8 @@ comms_fini(void)
 
 	// Request servicer thread
 	nvmi_info ("Joining request servicer");
-	if (gstate.request_service_thread) {
+	if (gstate.request_service_thread)
+	{
 		g_thread_join (gstate.request_service_thread);
 	}
 	gstate.request_service_thread = NULL;
@@ -1834,13 +1896,15 @@ comms_init(void)
 {
 	int rc = 0;
 
-	if (!gstate.use_comms) {
+	if (!gstate.use_comms)
+	{
 		goto exit;
 	}
 
 	// ZMQ context
 	gstate.zmq_context = zmq_ctx_new();
-	if (NULL == gstate.zmq_context) {
+	if (NULL == gstate.zmq_context)
+	{
 		rc = errno;
 		nvmi_warn ("zmq_ctx_new() failed");
 		goto exit;
@@ -1848,28 +1912,32 @@ comms_init(void)
 
 	// Event socket
 	gstate.zmq_event_socket = zmq_socket (gstate.zmq_context, ZMQ_PAIR);
-	if (NULL == gstate.zmq_event_socket) {
+	if (NULL == gstate.zmq_event_socket)
+	{
 		rc = zmq_errno();
 		nvmi_warn ("zmq_socket() failed");
 		goto exit;
 	}
 
 	rc = zmq_bind (gstate.zmq_event_socket, ZMQ_EVENT_CHANNEL);
-	if (rc) {
+	if (rc)
+	{
 		nvmi_warn ("zmq_bind(" ZMQ_EVENT_CHANNEL ") failed: %d", rc);
 		goto exit;
 	}
 
 	// Request socket
 	gstate.zmq_request_socket = zmq_socket (gstate.zmq_context, ZMQ_PAIR);
-	if (NULL == gstate.zmq_request_socket) {
+	if (NULL == gstate.zmq_request_socket)
+	{
 		rc = zmq_errno();
 		nvmi_warn ("zmq_socket() failed: %d", rc);
 		goto exit;
 	}
 
 	rc = zmq_connect (gstate.zmq_request_socket, ZMQ_REQUEST_CHANNEL);
-	if (rc) {
+	if (rc)
+	{
 		nvmi_warn ("zmq_connect(" ZMQ_REQUEST_CHANNEL ") failed: %d", rc);
 		goto exit;
 	}
@@ -1897,8 +1965,10 @@ main (int argc, char* argv[])
 
 	gstate.use_comms = true;
 
-	while ((opt = getopt(argc, argv, ":o:svd")) != -1) {
-		switch (opt) {
+	while ((opt = getopt(argc, argv, ":o:svd")) != -1)
+	{
+		switch (opt)
+		{
 		case 'o':
 			log_file = optarg;
 			break;
@@ -1918,7 +1988,8 @@ main (int argc, char* argv[])
 		}
 	}
 
-	if (help || argc - optind != 2) {
+	if (help || argc - optind != 2)
+	{
 		printf("*** Numen Introspection Framework v2.0 ***\n\n");
 		printf("Usage:\n");
 		printf("%s [-v] [-o logfile] <domain name> <path to system_map>\n", argv[0]);
@@ -1929,34 +2000,40 @@ main (int argc, char* argv[])
 		return 1;
 	}
 
-	if (logger_init(log_file, verbosity)) {
+	if (logger_init(log_file, verbosity))
+	{
 		goto exit;
 	}
 
 	// Returns with VM suspended
 	rc = nif_init (argv[optind], (bool *) &gstate.nif_busy);
-	if (rc) {
+	if (rc)
+	{
 		goto exit;
 	}
 
 	rc = nvmi_main_init ();
-	if (rc) {
+	if (rc)
+	{
 		goto exit;
 	}
 
 	rc = comms_init();
-	if (rc) {
+	if (rc)
+	{
 		goto exit;
 	}
 
 	rc = set_instrumentation_points (argv[optind+1]);
-	if (rc) {
+	if (rc)
+	{
 		goto exit;
 	}
 
 	// Resumes the VM, but returns with it paused
 	rc = nif_event_loop();
-	if (rc) {
+	if (rc)
+	{
 		goto exit;
 	}
 
