@@ -50,7 +50,6 @@ typedef uint16_t p2m_view_t;
 #if defined(ARM64)
 
 typedef uint32_t trap_val_t;
-//static trap_val_t trap =  0xD4000003; // ARM SMC
 
 #define TRAP_CODE 0xd4000003
 
@@ -58,7 +57,6 @@ typedef uint32_t trap_val_t;
 
 static vmi_event_t ss_event[MAX_VCPUS];
 typedef uint8_t trap_val_t;
-//static trap_val_t trap = 0xcc; // Intel #DB
 
 #define TRAP_CODE 0xcc
 
@@ -87,7 +85,6 @@ typedef struct
 	// View where all activated syscalls and instr points are trapped
 	p2m_view_t active_view;
 
-//#if defined(ARM64)
 	// View where instructions after every possibly-instrumented
 	// syscall and instr points are trapped. TODO: SS view needs
 	// to include SMC at __schedule, so context switches are
@@ -95,7 +92,6 @@ typedef struct
 	// context. Failure to do this could result in two SS SMCs
 	// being hit in a row, which we won't recover from.
 	p2m_view_t   ss_view;
-//#endif
 
 	addr_t kdtb;
 
@@ -108,6 +104,9 @@ typedef struct
 	GHashTable* pframe_sframe_mappings; //key:pframe
 
 	GHashTable* shadow_pnode_mappings; //key:shadow
+
+	// Fast lookup for BP
+	GHashTable* gpa_hook_mappings; // GPA -> hook_node
 
 	volatile bool interrupted;
 	sem_t start_loop;
@@ -314,26 +313,9 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 	}
 
 	// Otherwise this is the initial hook. Lookup the GFN -- do we know about it?
-	shadow = (addr_t) GPOINTER_TO_SIZE(
-		g_hash_table_lookup(xa.pframe_sframe_mappings,
-				    GSIZE_TO_POINTER(event->privcall_event.gfn)));
-	if (0 == shadow)
-	{
-		// No need to reinject since SMC is not available to guest
-		return VMI_EVENT_RESPONSE_NONE;
-	}
-
-	pgnode = g_hash_table_lookup (xa.shadow_pnode_mappings,
-				      GSIZE_TO_POINTER(shadow));
-	if (NULL == pgnode)
-	{
-		clog_error (CLOG(CLOGGER_ID), "Can't find pg_node for shadow: %" PRIx64 "", shadow);
-		return VMI_EVENT_RESPONSE_NONE;
-	}
-
-	hook_node = g_hash_table_lookup (pgnode->offset_bp_mappings,
-					 GSIZE_TO_POINTER(event->privcall_event.offset));
-
+	hook_node = g_hash_table_lookup (xa.gpa_hook_mappings,
+					 GSIZE_TO_POINTER(MKADDR(event->interrupt_event.gfn,
+								 event->interrupt_event.offset)));
 	xa.vcpu_hook_nodes [event->vcpu_id] = hook_node;
 	if (NULL == hook_node)
 	{
@@ -390,28 +372,9 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 	addr_t shadow = 0;
 
 	// lookup the gfn -- do we know about it?
-	shadow = (addr_t) GPOINTER_TO_SIZE(
-		g_hash_table_lookup (xa.pframe_sframe_mappings,
-				     GSIZE_TO_POINTER(event->interrupt_event.gfn)));
-
-	if (0 == shadow)
-	{
-		clog_warn (CLOG(CLOGGER_ID), "Can't find shadow for gfn=%" PRIx64 ", reinjecting.", shadow);
-		event->interrupt_event.reinject = 1;
-		return VMI_EVENT_RESPONSE_NONE;
-	}
-
-	pgnode = g_hash_table_lookup (xa.shadow_pnode_mappings,
-				      GSIZE_TO_POINTER(shadow));
-	if (NULL == pgnode)
-	{
-		clog_warn (CLOG(CLOGGER_ID), "Can't find page node for shadow=%" PRIx64 ", reinjecting.", shadow);
-		event->interrupt_event.reinject = 1;
-		return VMI_EVENT_RESPONSE_NONE;
-	}
-
-	hook_node = g_hash_table_lookup (pgnode->offset_bp_mappings,
-					 GSIZE_TO_POINTER (event->interrupt_event.offset));
+	hook_node = g_hash_table_lookup (xa.gpa_hook_mappings,
+					 GSIZE_TO_POINTER(MKADDR(event->interrupt_event.gfn,
+								 event->interrupt_event.offset)));
 
 	xa.vcpu_hook_nodes [event->vcpu_id] = hook_node;
 	if (NULL == hook_node)
@@ -429,7 +392,6 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 	{
 		clog_error (CLOG(CLOGGER_ID), "Warning: Failed to acquire hook lock %s. Blocking callback.",
 			    hook_node->name);
-//		event->slat_id = get_requested_view (false);
 		goto exit;
 	}
 
@@ -761,6 +723,7 @@ nif_enable_monitor (addr_t kva,
 #endif
 
 	g_hash_table_insert(pgnode->offset_bp_mappings, GSIZE_TO_POINTER(offset), hook_node);
+	g_hash_table_insert(xa.gpa_hook_mappings, GSIZE_TO_POINTER(pa), hook_node);
 
 exit:
 	return rc;
@@ -825,7 +788,6 @@ singlestep_cb(vmi_instance_t vmi, vmi_event_t* event)
 	nif_hook_node* hook_node = xa.vcpu_hook_nodes [event->vcpu_id];
 
 	assert (NULL != hook_node); // && true == hook_node->locked);
-
 	if (NULL != hook_node)
 	{
 		if (hook_node->post_cb)
@@ -839,10 +801,13 @@ singlestep_cb(vmi_instance_t vmi, vmi_event_t* event)
 		g_rw_lock_reader_unlock (&hook_node->lock);
 		hook_node->rlocked = false;
 	}
-
+	else
+	{
+		clog_warn (CLOG(CLOGGER_ID), "Found hook %s unlocked; not attempting unlock", hook_node->name);
+	}
 	event->slat_id = get_requested_view (true);
 
-	return (VMI_EVENT_RESPONSE_TOGGLE_SINGLESTEP|
+	return (VMI_EVENT_RESPONSE_TOGGLE_SINGLESTEP |
 		VMI_EVENT_RESPONSE_VMM_PAGETABLE_ID);
 }
 
@@ -977,6 +942,38 @@ destroy_views (void)
 	}
 }
 
+
+#define MAX_LOCK_BREAK_ATTEMPTS 3
+
+static void
+break_lock (nif_hook_node * node)
+{
+	int tries = 0;
+	while (tries++ < MAX_LOCK_BREAK_ATTEMPTS)
+	{
+		node->wlocked = g_rw_lock_writer_trylock (&node->lock);
+		if (node->wlocked)
+		{
+			break;
+		}
+		clog_warn (CLOG(CLOGGER_ID), "Can't lock node %s, waiting...", node->name);
+		usleep(20);
+	}
+
+	if (!node->wlocked)
+	{
+		clog_warn (CLOG(CLOGGER_ID), "Breaking lock on node %s, waiting...", node->name);
+		g_rw_lock_reader_unlock (&node->lock);
+		node->rlocked = false;
+		if (!g_rw_lock_writer_trylock (&node->lock))
+		{
+			clog_error (CLOG(CLOGGER_ID),
+				    "Still can't acquire lock on node %s", node->name);
+		}
+	}
+}
+
+
 static void
 allow_callbacks (bool allowed)
 {
@@ -1005,12 +1002,14 @@ allow_callbacks (bool allowed)
 					g_rw_lock_writer_unlock (&node->lock);
 					node->wlocked = false;
 				}
-
 			}
 			else
 			{
-				g_rw_lock_writer_lock (&node->lock);
-				node->wlocked = true;
+				node->wlocked = g_rw_lock_writer_trylock (&node->lock);
+				if (!node->wlocked)
+				{
+					break_lock (node);
+				}
 			}
 		} // inner for
 		g_list_free (hooks);
@@ -1182,6 +1181,12 @@ nif_fini(void)
 		xa.pframe_sframe_mappings = NULL;
 	}
 
+	if (NULL != xa.gpa_hook_mappings)
+	{
+		g_hash_table_destroy (xa.gpa_hook_mappings);
+		xa.gpa_hook_mappings = NULL;
+	}
+
 	destroy_views();
 
 	fini_xen_monitor();
@@ -1225,6 +1230,7 @@ nif_init(const char* name,
 
 	xa.pframe_sframe_mappings = g_hash_table_new (NULL, NULL);
 	xa.shadow_pnode_mappings = g_hash_table_new_full (NULL, NULL, NULL, free_nif_page_node);
+	xa.gpa_hook_mappings  = g_hash_table_new (NULL, NULL);
 
 	// Pause the VM here. It is resumed via nif_event_loop() and nif_fini()
 	vmi_pause_vm(xa.vmi);
