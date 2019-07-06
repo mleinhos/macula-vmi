@@ -11,8 +11,14 @@
 
 #include "nvmi-public-defs.h"
 
-// For clog
+// For logging (using clog)
 #define CLOGGER_ID  0
+
+#define nvmi_debug(...)  clog_debug(CLOG(CLOGGER_ID),  __VA_ARGS__)
+#define nvmi_info(...)   clog_info(CLOG(CLOGGER_ID),  __VA_ARGS__)
+#define nvmi_warn(...)   clog_warn(CLOG(CLOGGER_ID),   __VA_ARGS__)
+#define nvmi_error(...)  clog_error(CLOG(CLOGGER_ID),  __VA_ARGS__)
+
 
 #define NVMI_MAX_SYSCALL_ARG_CT 6
 #define NVMI_MAX_SYSCALL_CT 450

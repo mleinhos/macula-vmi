@@ -154,16 +154,20 @@ logger_init (const char * logfile,
 {
 	int rc = 0;
 
-	if (logfile) {
+	if (logfile)
+	{
 		fprintf (stderr, "Initializing logging to %s, verbosity=%d\n",
 			 logfile, verbosity_level);
 		rc =  clog_init_path (CLOGGER_ID, logfile);
-	} else {
+	}
+	else
+	{
 		fprintf (stderr, "Initializing logging to stderr, verbosity=%d\n",
 			 verbosity_level);
 		rc = clog_init_fd (CLOGGER_ID, fileno(stderr));
 	}
-	if (rc) {
+	if (rc)
+	{
 		fprintf (stderr, "Logger initialization failure\n");
 		goto exit;
 	}
@@ -192,8 +196,9 @@ exit:
 static void
 close_handler(int sig)
 {
-	clog_info (CLOG(CLOGGER_ID), "Received notification to stop (%d), shutting down", sig);
-	if (!gstate.interrupted) {
+	nvmi_info ("Received notification to stop (%d), shutting down", sig);
+	if (!gstate.interrupted)
+	{
 		gstate.interrupted = true;
 		nif_stop();
 	}
@@ -202,15 +207,14 @@ close_handler(int sig)
 static void
 dump_cb_stats(void)
 {
-	clog_warn (CLOG(CLOGGER_ID), "*************** BEGIN STATISTICS ****************" );
+	nvmi_warn ("*************** BEGIN STATISTICS ****************" );
 
 	for (int i = 0; i < NUMBER_OF(nvmi_syscalls); ++i)
 	{
 		nvmi_cb_info_t * cbi = &nvmi_syscalls[i];
 		if (0 == cbi->hitct) continue;
 
-		clog_warn (CLOG(CLOGGER_ID), "Called % 16d times: %s",
-			   cbi->hitct, cbi->name);
+		nvmi_warn ("Called % 16d times: %s", cbi->hitct, cbi->name);
 	}
 
 	for (int i = 0; i < NUMBER_OF(nvmi_special_cbs); ++i)
@@ -218,11 +222,10 @@ dump_cb_stats(void)
 		nvmi_cb_info_t * cbi = &nvmi_special_cbs[i];
 		if (0 == cbi->hitct) continue;
 
-		clog_warn (CLOG(CLOGGER_ID), "Called % 16d times: %s",
-			   cbi->hitct, cbi->name);
+		nvmi_warn ("Called % 16d times: %s", cbi->hitct, cbi->name);
 	}
-	clog_warn (CLOG(CLOGGER_ID), "Event count: %ld", gstate.event_id);
-	clog_warn (CLOG(CLOGGER_ID), "*************** END STATISTICS ****************" );
+	nvmi_warn ("Event count: %ld", gstate.event_id);
+	nvmi_warn ("*************** END STATISTICS ****************" );
 }
 
 
@@ -236,16 +239,18 @@ cb_gather_registers (vmi_instance_t vmi,
 	status_t status = VMI_SUCCESS;
 	reg_t x[8];
 
-	for (int i = 0; i < argct; ++i) {
+	for (int i = 0; i < argct; ++i)
+	{
 		status_t status = vmi_get_vcpureg (vmi,
 						   &regs->syscall_args[i],
 						   nvmi_syscall_arg_regs[i],
 						   event->vcpu_id);
-		if (VMI_FAILURE == status) {
+		if (VMI_FAILURE == status)
+		{
 			rc = EIO;
 			goto exit;
 		}
-		//clog_debug (CLOG(CLOGGER_ID), "syscall arg %d = %lx", i, regs->syscall_args[i]);
+		//nvmi_debug ("syscall arg %d = %lx", i, regs->syscall_args[i]);
 	}
 
 	// Get the rest of the context too, for context lookup. Beware KPTI!!
@@ -257,9 +262,10 @@ cb_gather_registers (vmi_instance_t vmi,
 	regs->x86.r = *(event->x86_regs);
 	status = vmi_get_vcpureg (vmi, &regs->x86.sp, RSP, event->vcpu_id);
 #endif
-	if (VMI_SUCCESS != status) {
+	if (VMI_SUCCESS != status)
+	{
 		rc = EFAULT;
-		clog_warn (CLOG(CLOGGER_ID), "vmi_get_vcpureg() failed");
+		nvmi_warn ("vmi_get_vcpureg() failed");
 		goto exit;
 	}
 
@@ -270,29 +276,31 @@ cb_gather_registers (vmi_instance_t vmi,
 	status |= vmi_get_vcpureg (vmi, &regs->arm.r.sp,     SP_USR, event->vcpu_id);
 	status |= vmi_get_vcpureg (vmi, &regs->arm.r.sp_el0, SP_EL0, event->vcpu_id);
 
-	for (int i = 0; i < NUMBER_OF(x); ++i) {
+	for (int i = 0; i < NUMBER_OF(x); ++i)
+{
 		(void) vmi_get_vcpureg (vmi, &x[i], R0+i, event->vcpu_id);
-		clog_debug (CLOG(CLOGGER_ID), "R%d = 0x%lx", i, x[i]);
+		nvmi_debug ("R%d = 0x%lx", i, x[i]);
 	}
 
-	clog_debug (CLOG(CLOGGER_ID), "Event: ttbr0 = 0x%lx", event->arm_regs->ttbr0);
-	clog_debug (CLOG(CLOGGER_ID), "Event: ttbr1 = 0x%lx", event->arm_regs->ttbr1);
-	clog_debug (CLOG(CLOGGER_ID), "Event: ttbcr = 0x%lx", event->arm_regs->ttbcr);
-	clog_debug (CLOG(CLOGGER_ID), "Event: cpsr  = 0x%lx", event->arm_regs->cpsr);
+	nvmi_debug ("Event: ttbr0 = 0x%lx", event->arm_regs->ttbr0);
+	nvmi_debug ("Event: ttbr1 = 0x%lx", event->arm_regs->ttbr1);
+	nvmi_debug ("Event: ttbcr = 0x%lx", event->arm_regs->ttbcr);
+	nvmi_debug ("Event: cpsr  = 0x%lx", event->arm_regs->cpsr);
 
-	clog_debug (CLOG(CLOGGER_ID), "context: ttbr0   = %lx", regs->arm.r.ttbr0);
-	clog_debug (CLOG(CLOGGER_ID), "context: ttbr1   = %lx", regs->arm.r.ttbr1);
-	clog_debug (CLOG(CLOGGER_ID), "context: sp_el0  = %lx", regs->arm.r.sp_el0);
-	clog_debug (CLOG(CLOGGER_ID), "context: sp      = %lx", regs->arm.r.sp);
+	nvmi_debug ("context: ttbr0   = %lx", regs->arm.r.ttbr0);
+	nvmi_debug ("context: ttbr1   = %lx", regs->arm.r.ttbr1);
+	nvmi_debug ("context: sp_el0  = %lx", regs->arm.r.sp_el0);
+	nvmi_debug ("context: sp      = %lx", regs->arm.r.sp);
 
 #else
 	status  = vmi_get_vcpureg (vmi, &regs->intel.cr3,     CR3,     event->vcpu_id);
 	status |= vmi_get_vcpureg (vmi, &regs->intel.sp,      RSP,     event->vcpu_id);
 	status |= vmi_get_vcpureg (vmi, &regs->intel.gs_base, GS_BASE, event->vcpu_id);
 #endif
-	if (VMI_SUCCESS != status) {
+	if (VMI_SUCCESS != status)
+	{
 		rc = EFAULT;
-		clog_warn (CLOG(CLOGGER_ID), "vmi_get_vcpureg() failed");
+		nvmi_warn ("vmi_get_vcpureg() failed");
 		goto exit;
 	}
 */
@@ -311,8 +319,9 @@ deref_task_context (gpointer arg)
 	atomic_t val = 	atomic_dec (&tinfo->refct);
 	assert (val >= 0);
 
-	if (0 == val) {
-		clog_info (CLOG(CLOGGER_ID), "**** Process pid=%ld comm=%s destroyed ****",
+	if (0 == val)
+	{
+		nvmi_info ("**** Process pid=%ld comm=%s destroyed ****",
 			 tinfo->pid, tinfo->comm);
 		g_slice_free (nvmi_task_info_t, tinfo);
 	}
@@ -350,10 +359,10 @@ cb_current_pid  (vmi_instance_t vmi,
 				  regs->x86.r.gs_base + gstate.va_current_task,
 				  0,
 				  &local_curr);
-	if (VMI_SUCCESS != status) {
+	if (VMI_SUCCESS != status)
+	{
 		rc = EIO;
-		clog_warn (CLOG(CLOGGER_ID),
-			   "Failed to determine current task (from gs_base=%p + curr_task_offset=%p)",
+		nvmi_warn ("Failed to determine current task (from gs_base=%p + curr_task_offset=%p)",
 			   regs->x86.r.gs_base + gstate.va_current_task);
 		goto exit;
 	}
@@ -361,9 +370,10 @@ cb_current_pid  (vmi_instance_t vmi,
 
 	// Get current->pid
 	status = vmi_read_32_va(vmi, local_curr + gstate.task_pid_ofs, 0, &local_pid);
-	if (VMI_FAILURE == status) {
+	if (VMI_FAILURE == status)
+	{
 		rc = EFAULT;
-		clog_warn (CLOG(CLOGGER_ID), "Failed to read task's pid at %" PRIx64 " + %lx",
+		nvmi_warn ("Failed to read task's pid at %" PRIx64 " + %lx",
 			   local_curr, gstate.task_pid_ofs);
 		goto exit;
 	}
@@ -397,9 +407,10 @@ cb_current_task (vmi_instance_t vmi,
 				curr_task + gstate.task_pid_ofs,
 				0,
 				&(*tinfo)->pid);
-	if (VMI_FAILURE == status) {
+	if (VMI_FAILURE == status)
+	{
 		rc = EFAULT;
-		clog_warn (CLOG(CLOGGER_ID), "Failed to read task's pid at %" PRIx64 " + %lx",
+		nvmi_warn ("Failed to read task's pid at %" PRIx64 " + %lx",
 			 (*tinfo)->task_struct, gstate.task_pid_ofs);
 		goto exit;
 	}
@@ -414,10 +425,11 @@ cb_current_task (vmi_instance_t vmi,
 					   regs->x86.r.gs_base + gstate.va_current_task,
 					   0,
 					   task);
-	if (VMI_SUCCESS != status) {
+	if (VMI_SUCCESS != status)
+	{
 		rc = EIO;
 		task = NULL;
-		clog_warn (CLOG(CLOGGER_ID), "Failed to determine current task (from gs_base + curr_task_offset)");
+		nvmi_warn ("Failed to determine current task (from gs_base + curr_task_offset)");
 		goto exit;
 	}
 #endif
@@ -458,9 +470,10 @@ cb_build_task_context (vmi_instance_t vmi,
 				curr_task + gstate.task_pid_ofs,
 				0,
 				&(*tinfo)->pid);
-	if (VMI_FAILURE == status) {
+	if (VMI_FAILURE == status)
+	{
 		rc = EFAULT;
-		clog_warn (CLOG(CLOGGER_ID), "Failed to read task's pid at %" PRIx64 " + %lx",
+		nvmi_warn ("Failed to read task's pid at %" PRIx64 " + %lx",
 			 (*tinfo)->task_struct, gstate.task_pid_ofs);
 		goto exit;
 	}
@@ -471,15 +484,16 @@ cb_build_task_context (vmi_instance_t vmi,
 	// Get current->comm
 	// TODO: This is wrong
 	pname = vmi_read_str_va (vmi, curr_task + gstate.task_name_ofs, 0);
-	if (NULL == pname) {
+	if (NULL == pname)
+	{
 		rc = EFAULT;
-		clog_warn (CLOG(CLOGGER_ID), "Failed to read task's comm at %" PRIx64 " + %lx",
+		nvmi_warn ("Failed to read task's comm at %" PRIx64 " + %lx",
 			 (*tinfo)->task_struct, gstate.task_name_ofs);
 		goto exit;
 	}
 
-//	clog_info (CLOG(CLOGGER_ID), "pid %d --> task %p, comm %s", pid, curr_task, pname);
-	clog_info (CLOG(CLOGGER_ID), "pid %d --> task %p, comm %s",
+//	nvmi_info ("pid %d --> task %p, comm %s", pid, curr_task, pname);
+	nvmi_info ("pid %d --> task %p, comm %s",
 		   (*tinfo)->pid, curr_task, pname);
 
 	strncpy ((*tinfo)->comm, pname, sizeof((*tinfo)->comm));
@@ -491,21 +505,23 @@ cb_build_task_context (vmi_instance_t vmi,
 
 	// Read current->mm
 	status = vmi_read_addr_va (vmi, curr_task + gstate.task_mm_ofs, 0, &task_mm);
-	if (VMI_FAILURE == status) {
+	if (VMI_FAILURE == status)
+	{
 		rc = EIO;
-		clog_warn (CLOG(CLOGGER_ID), "Failed to read current->mm");
+		nvmi_warn ("Failed to read current->mm");
 		goto exit;
 	}
 
 	// Read current->mm->pgd: Yields wrong result on ARM
 	status = vmi_read_addr_va (vmi, task_mm + gstate.mm_pgd_ofs, 0, &(*tinfo)->task_dtb);
-	if (VMI_FAILURE == status) {
+	if (VMI_FAILURE == status)
+	{
 		rc = EIO;
-		clog_warn (CLOG(CLOGGER_ID), "Failed to read mm->pgd");
+		nvmi_warn ("Failed to read mm->pgd");
 		goto exit;
 	}
 
-	clog_debug (CLOG(CLOGGER_ID), "(task->mm->pgd: PID %d --> dtb %lx",
+	nvmi_debug ("(task->mm->pgd: PID %d --> dtb %lx",
 		 (uint32_t) (*tinfo)->pid,
 		 (*tinfo)->task_dtb);
 #endif
@@ -519,7 +535,7 @@ cb_build_task_context (vmi_instance_t vmi,
 	status = vmi_read_addr_va (vmi, curr_task + gstate.task_mm_ofs, 0, &task_mm);
 	if (VMI_FAILURE == status) {
 		rc = EIO;
-		clog_warn (CLOG(CLOGGER_ID), "Failed to read current->mm");
+		nvmi_warn ("Failed to read current->mm");
 		goto exit;
 	}
 
@@ -527,28 +543,29 @@ cb_build_task_context (vmi_instance_t vmi,
 	status = vmi_read_addr_va (vmi, task_mm + gstate.mm_pgd_ofs, 0, &(*tinfo)->task_dtb);
 	if (VMI_FAILURE == status) {
 		rc = EIO;
-		clog_warn (CLOG(CLOGGER_ID), "Failed to read mm->pgd");
+		nvmi_warn ("Failed to read mm->pgd");
 		goto exit;
 	}
 
-	clog_debug (CLOG(CLOGGER_ID), "(task->mm->pgd: PID %d --> dtb %lx",
+	nvmi_debug ("(task->mm->pgd: PID %d --> dtb %lx",
 		 (uint32_t) (*tinfo)->pid,
 		 (*tinfo)->task_dtb);
 	*/
 
 	status = vmi_pid_to_dtb (vmi, (*tinfo)->pid, &(*tinfo)->task_dtb);
-	if (VMI_FAILURE == status) {
+	if (VMI_FAILURE == status)
+	{
 		rc = EIO;
-		clog_warn (CLOG(CLOGGER_ID), "Failed to find page base for task, pid=%ld",
-			 (*tinfo)->pid);
+		nvmi_warn ("Failed to find page base for task, pid=%ld",
+			   (*tinfo)->pid);
 		goto exit;
 	}
-	clog_debug (CLOG(CLOGGER_ID), "vmi_pid_to_dtb: PID %d --> dtb %lx",
-		 (uint32_t) (*tinfo)->pid,
-		 (*tinfo)->task_dtb);
+	nvmi_debug ("vmi_pid_to_dtb: PID %d --> dtb %lx",
+		    (uint32_t) (*tinfo)->pid,
+		    (*tinfo)->task_dtb);
 
 #endif
-	clog_debug (CLOG(CLOGGER_ID), "Build context: task=%lx (key) pid=%d comm=%s",
+	nvmi_debug ("Build context: task=%lx (key) pid=%d comm=%s",
 		    curr_task, (*tinfo)->pid, (*tinfo)->comm);
 
 exit:
@@ -585,7 +602,7 @@ cb_gather_context (vmi_instance_t vmi,
 	rc = cb_current_task (vmi, vmievent, &evt->r, &curr);
 	if (rc)
 	{
-		clog_warn (CLOG(CLOGGER_ID), "Context could not be found");
+		nvmi_warn ("Context could not be found");
 		goto exit;
 	}
 
@@ -607,8 +624,7 @@ cb_gather_context (vmi_instance_t vmi,
 			{
 				goto exit;
 			}
-			clog_warn (CLOG(CLOGGER_ID),
-				   "Using partial context for PID %d", task->pid);
+			nvmi_warn ("Using partial context for PID %d", task->pid);
 			rc = 0;
 		}
 
@@ -716,8 +732,7 @@ read_user_mem (vmi_instance_t vmi,
 		str = vmi_read_str_va (vmi, va, evt->task->pid);
 		if (NULL == str)
 		{
-			clog_error (CLOG(CLOGGER_ID),
-				    "Error: could not read string at %" PRIx64 " in PID %d",
+			nvmi_error ("Could not read string at %" PRIx64 " in PID %d",
 				    va, evt->task->pid);
 			goto failsafe;
 		}
@@ -739,13 +754,12 @@ read_user_mem (vmi_instance_t vmi,
 	status = vmi_pid_to_dtb (vmi, evt->task->pid, &dtb);
 	if (VMI_FAILURE == status) {
 		rc = EIO;
-		clog_info (CLOG(CLOGGER_ID),"Error could get DTB for pid %ld", evt->task->pid);
+		nvmi_info ("Error could get DTB for pid %ld", evt->task->pid);
 		goto exit;
 	}
 */
 	dtb = evt->task->task_dtb;
-	clog_debug (CLOG(CLOGGER_ID), "PID %ld --> DTB %lx",
-		 evt->task->pid, dtb);
+	nvmi_debug ("PID %ld --> DTB %lx", evt->task->pid, dtb);
 
 	vmi_v2pcache_flush (vmi, dtb);
 	//vmi_v2pcache_flush (vmi,  ~0ull);
@@ -761,7 +775,7 @@ read_user_mem (vmi_instance_t vmi,
 //	if (VMI_FAILURE == status) {
 	if (NULL == str) {
 		rc = EIO;
-		clog_info (CLOG(CLOGGER_ID),"Error could get PA from VA %" PRIx64 ".", va);
+		nvmi_info ("Error could get PA from VA %" PRIx64 ".", va);
 		goto exit;
 	}
 */
@@ -770,14 +784,14 @@ read_user_mem (vmi_instance_t vmi,
 	if (VMI_FAILURE == status)
 	{
 		rc = EIO;
-		clog_warn (CLOG(CLOGGER_ID), "Error could read memory from VA %" PRIx64 ".", va);
+		nvmi_warn ("Error could read memory from VA %" PRIx64 ".", va);
 
 		snprintf (buf, sizeof(buf), "*0x%" PRIx64, va);
 		str = strdup (buf);
 		goto exit;
 	}
 
-	clog_debug (CLOG(CLOGGER_ID), "Read string '%s' from memory", buf);
+	nvmi_debug ("Read string '%s' from memory", buf);
 //	str = strdup ("junk");
 	str = strdup (buf);
 	goto exit;
@@ -787,7 +801,7 @@ read_user_mem (vmi_instance_t vmi,
 #  if 1 // x86: works
 	str = vmi_read_str_va (vmi, va, evt->task->pid);
 	if (NULL == str) {
-		clog_info (CLOG(CLOGGER_ID),"Error: could not read string at %" PRIx64 " in PID %lx",
+		nvmi_info ("Error: could not read string at %" PRIx64 " in PID %lx",
 			va, evt->task->pid);
 		goto exit;
 	}
@@ -797,7 +811,7 @@ read_user_mem (vmi_instance_t vmi,
 	status = vmi_pid_to_dtb (vmi, evt->task->pid, &dtb);
 	if (VMI_FAILURE == status) {
 		rc = EIO;
-		clog_info (CLOG(CLOGGER_ID),"Error could get DTB for pid %ld", evt->task->pid);
+		nvmi_info ("Error could get DTB for pid %ld", evt->task->pid);
 		goto exit;
 	}
 
@@ -810,14 +824,14 @@ read_user_mem (vmi_instance_t vmi,
 //	if (VMI_FAILURE == status) {
 	if (NULL == str) {
 		rc = EIO;
-		clog_info (CLOG(CLOGGER_ID),"Error could get PA from VA %" PRIx64 ".", va);
+		nvmi_info ("Error could get PA from VA %" PRIx64 ".", va);
 		goto exit;
 	}
 //	status = vmi_pagetable_lookup (vmi, evt->r.ttrb1, va, &pa);
 //	status = vmi_read_va (vmi, va, evt->r.ttbr1)
 #  endif
 
-//	clog_info (CLOG(CLOGGER_ID), "Successfully read string '%s' from mem (%lx pid %lx)",
+//	nvmi_info ("Successfully read string '%s' from mem (%lx pid %lx)",
 //		 str, va, evt->task->pid);
 
 #else // ARM
@@ -881,7 +895,7 @@ cb_pre_instr_kill_process (vmi_instance_t vmi, nvmi_event_t * evt, vmi_event_t* 
 		if (VMI_FAILURE == status)
 		{
 			rc = EIO;
-			clog_warn (CLOG(CLOGGER_ID), "Failed to write syscall register #%d", i);
+			nvmi_warn ("Failed to write syscall register #%d", i);
 			break;
 		}
 		attempted = true;
@@ -889,7 +903,7 @@ cb_pre_instr_kill_process (vmi_instance_t vmi, nvmi_event_t * evt, vmi_event_t* 
 
 	if (attempted)
 	{
-		clog_warn (CLOG(CLOGGER_ID), "Attempted to kill process %d, comm=%s %d times",
+		nvmi_warn ("Attempted to kill process %d, comm=%s %d times",
 			   evt->task->pid, evt->task->comm, evt->task->kill_attempts);
 	}
 
@@ -919,9 +933,8 @@ cb_update_trigger_state (nvmi_cb_info_t * cbi,
 		// Even if this has already caused a trigger, reset its stats
 		if (!task->triggered)
 		{
-			clog_info (CLOG(CLOGGER_ID),
-				   "Initiating trigger: event %s proc %s", cbi->name, task->comm);
 			new_level = NVMI_MONITOR_LEVEL_ACTIVE;
+			nvmi_info ("Initiating trigger: event %s proc %s", cbi->name, task->comm);
 			atomic_inc (&gstate.triggered_procs);
 			task->triggered = true;
 		}
@@ -940,7 +953,6 @@ cb_update_trigger_state (nvmi_cb_info_t * cbi,
 	if (cbi->state.trigger_off)
 	{
 		clog_warn (CLOG(CLOGGER_ID), "Event untriggers task");
-		change = true;
 		new_level = NVMI_MONITOR_LEVEL_TRIGGERS;
 		task_untriggered = true;
 	}
@@ -948,14 +960,15 @@ cb_update_trigger_state (nvmi_cb_info_t * cbi,
 	if (task_untriggered)
 	{
 		unsigned long pct = atomic_dec (&gstate.triggered_procs);
-		clog_info (CLOG(CLOGGER_ID),
-			   "Dropping trigger: event %s proc %s", cbi->name, task->comm);
+		nvmi_warn ("Saw over threshold of events (task %s, count %d), or event (%s) untriggers",
+			   task->comm, ct, cbi->name);
+
 		task->triggered = false;
 		task->events_since_trigger = 0;
 
 		if (0 == pct)
 		{
-			clog_warn (CLOG(CLOGGER_ID), "No triggered processes remain");
+			nvmi_warn ("No triggered processes remain");
 			new_level = NVMI_MONITOR_LEVEL_TRIGGERS;
 		}
 	}
@@ -1002,9 +1015,10 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 		reg_t val = evt->r.syscall_args[i];
 		char * buf = NULL;
 
-		//clog_debug (CLOG(CLOGGER_ID), "Syscall processing arg %d, val=%lx", i, val);
+		//nvmi_debug ("Syscall processing arg %d, val=%lx", i, val);
 
-		switch (cbi->args[i].type) {
+		switch (cbi->args[i].type)
+		{
 		case NVMI_ARG_TYPE_SCALAR:
 		case NVMI_ARG_TYPE_PVOID:
 		case NVMI_ARG_TYPE_POLLFD:
@@ -1014,7 +1028,7 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 			buf = read_user_mem (vmi, evt, val, 0, 0);
 			if (NULL == buf)
 			{
-				clog_warn (CLOG(CLOGGER_ID), "Failed to read str syscall arg");
+				nvmi_warn ("Failed to read str syscall arg");
 				continue;
 			}
 
@@ -1024,7 +1038,8 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 			free (buf);
 			dataofs += evt->arg_lens[i];
 			break;
-		case NVMI_ARG_TYPE_SA: {
+		case NVMI_ARG_TYPE_SA:
+		{
 #if 0
 			struct addrinfo_in6 ai;
 			struct addrinfo *res;
@@ -1037,14 +1052,14 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 					      NULL);
 			if (VMI_FAILURE == status)
 			{
-				clog_warn (CLOG(CLOGGER_ID), "Failed to read addrinfo struct");
+				nvmi_warn ("Failed to read addrinfo struct");
 				continue;
 			}
 
 			rc = getaddrinfo (NULL, NULL, (const struct addrinfo *) &ai, &res);
 			if (rc)
 			{
-				clog_warn (CLOG(CLOGGER_ID), "Failed to decode addrinfo struct");
+				nvmi_warn ("Failed to decode addrinfo struct");
 				continue;
 			}
 
@@ -1070,8 +1085,7 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 		if (!size_warning)
 		{
 			size_warning = true;
-			clog_error (CLOG(CLOGGER_ID),
-				   "Event queue length exceeds threshold (%d), new event(s) not pushed",
+			nvmi_error ("Event queue length exceeds threshold (%d), new event(s) not pushed",
 				   EVENT_QUEUE_MAX_LENGTH);
 		}
 		// !!!! Destroy the un-consumed event. Do not push it. !!!!
@@ -1104,8 +1118,7 @@ static void
 cb_post_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 {
 	nvmi_cb_info_t * cbi = (nvmi_cb_info_t *) arg;
-	clog_info (CLOG(CLOGGER_ID),
-		   "Post CB for callback %s", cbi->name);
+	nvmi_info ("Post CB for callback %s", cbi->name);
 }
 
 
@@ -1125,7 +1138,7 @@ instrument_special_point (const char *name, addr_t kva)
 
 		rc = nif_enable_monitor (kva, name, cb_pre_instr_pt, cb_post_instr_pt, cbi, cbi->state.trigger);
 		if (rc) {
-			clog_warn (CLOG(CLOGGER_ID), "Failed to add pg/bp for %s at %" PRIx64 "", name, kva);
+			nvmi_warn ("Failed to add pg/bp for %s at %" PRIx64 "", name, kva);
 			goto exit;
 		}
 	}
@@ -1144,21 +1157,26 @@ instrument_syscall (char *name, addr_t kva)
 	static bool prediscovery = false;
 	static size_t nvmi_syscall_new = 0; // where to put new (incomplete) entries into table?
 
-	if (!prediscovery) {
+	if (!prediscovery)
+	{
 		prediscovery = true;
-		for (int i = 0; i < NUMBER_OF(nvmi_syscalls); ++i) {
-			if (strlen(nvmi_syscalls[i].name) > 0) {
+		for (int i = 0; i < NUMBER_OF(nvmi_syscalls); ++i)
+		{
+			if (strlen(nvmi_syscalls[i].name) > 0)
+			{
 				++nvmi_syscall_new;
 			}
 		}
 	}
 
 	// SyS --> sys
-	for (int i = 0; i < 3; ++i) {
+	for (int i = 0; i < 3; ++i)
+	{
 		name[i] = (char) tolower(name[i]);
 	}
 
-	if (strncmp (name, "sys_", 4)) {
+	if (strncmp (name, "sys_", 4))
+	{
 		// mismatch
 		rc = ENOENT;
 		goto exit;
@@ -1186,51 +1204,59 @@ instrument_syscall (char *name, addr_t kva)
 
 	// Bail if we're already monitoring that point
 	rc = nif_is_monitored (kva, &monitored);
-	if (rc) {
+	if (rc)
+	{
 		goto exit;
 	}
 
-	if (monitored) {
-		clog_info (CLOG(CLOGGER_ID), "KVA %" PRIx64 " is alraedy monitored", kva);
+	if (monitored)
+	{
+		nvmi_info ("KVA %" PRIx64 " is alraedy monitored", kva);
 		goto exit;
 	}
 
 	gstate.act_calls++;
-	if (gstate.act_calls == NVMI_MAX_SYSCALL_CT-1) { // max syscalls that we want to monitor
+	if (gstate.act_calls == NVMI_MAX_SYSCALL_CT-1)  // max syscalls that we want to monitor
+	{
 		rc = ENOSPC;
-		clog_info (CLOG(CLOGGER_ID), "Exceeding max allowed syscalls. Halting search.");
+		nvmi_info ("Exceeding max allowed syscalls. Halting search.");
 		goto exit;
 	}
 
 	// We've found a syscall, and we have its address. Now, find it in our syscall table
-	for (int i = 0; i < nvmi_syscall_new; ++i) { //NUMBER_OF(nvmi_syscalls); ++i) {
-		if (!strcmp(name, nvmi_syscalls[i].name)) {
+	for (int i = 0; i < nvmi_syscall_new; ++i)
+	{
+		if (!strcmp(name, nvmi_syscalls[i].name))
+		{
 			cbi = &nvmi_syscalls[i];
 			break;
 		}
 	}
 
 	// Now, with or without the syscall def, monitor this syscall
-	clog_info (CLOG(CLOGGER_ID), "#%d: Monitoring symbol %s at %" PRIx64 "",
-		 gstate.act_calls, name, kva);
+	nvmi_info ("#%d: Monitoring symbol %s at %" PRIx64 "",
+		   gstate.act_calls, name, kva);
 
 	// Stage syscall dynamically; name only
-	if (NULL == cbi) {
-		clog_info (CLOG(CLOGGER_ID), "monitoring syscall %s without a template", name);
+	if (NULL == cbi)
+	{
+		nvmi_info ("monitoring syscall %s without a template", name);
 		cbi = &nvmi_syscalls[nvmi_syscall_new++];
 		cbi->cb_type = NVMI_CALLBACK_SYSCALL;
 		cbi->state.enabled = true;
 		strncpy (cbi->name, name, SYSCALL_MAX_NAME_LEN);
 	}
 
-	if (!cbi->state.enabled) {
+	if (!cbi->state.enabled)
+	{
 		rc = ENOENT; // not quite right
 		goto exit;
 	}
 
 	rc = nif_enable_monitor (kva, name, cb_pre_instr_pt, NULL /*cb_post_instr_pt*/, cbi, cbi->state.trigger);
-	if (rc) {
-		clog_warn (CLOG(CLOGGER_ID), "Failed to add pg/bp for %s at %" PRIx64 "", name, kva);
+	if (rc)
+	{
+		nvmi_warn ("Failed to add pg/bp for %s at %" PRIx64 "", name, kva);
 		goto exit;
 	}
 
@@ -1250,13 +1276,15 @@ set_instrumentation_points (const char* mappath)
 	int rc = 0;
 
 	input_file = fopen(mappath, "r+");
-	if (NULL == input_file) {
+	if (NULL == input_file)
+	{
 		rc = EINVAL;
-		clog_warn (CLOG(CLOGGER_ID), "Can't open system map file '%s'", mappath);
+		nvmi_warn ("Can't open system map file '%s'", mappath);
 		goto exit;
 	}
 
-	while (fgets( one_line, sizeof(one_line), input_file) != NULL) {
+	while (fgets( one_line, sizeof(one_line), input_file) != NULL)
+	{
 		char * name = NULL;
 		addr_t kva = 0;
 
@@ -1279,28 +1307,35 @@ set_instrumentation_points (const char* mappath)
 		//if (0 == strcmp("sys_sendmsg", name)) { __asm__("int $3");}
 
 		rc = instrument_special_point (name, kva);
-		if (0 == rc) { // success
-			continue;
-		} else if (ENOENT != rc) {
+		if (0 == rc)
+		{
+			continue; // success
+		}
+		else if (ENOENT != rc)
+		{
 			// failure for reason other than line mismatch
 			goto exit;
 		}
 
 		// Otherwise, try to match with a syscall
 		rc = instrument_syscall (name, kva);
-		if (0 == rc) { // success
-			continue;
-		} else if (ENOENT != rc) {
+		if (0 == rc)
+		{
+			continue; // success
+		}
+		else if (ENOENT != rc)
+		{
 			// failure for reason other than line mismatch
 			goto exit;
 		}
 	} // while
 
-	clog_info (CLOG(CLOGGER_ID), "Found %d syscalls to monitor", gstate.act_calls);
+	nvmi_info ("Found %d syscalls to monitor", gstate.act_calls);
 	rc = 0;
 
 exit:
-	if (NULL != input_file) {
+	if (NULL != input_file)
+	{
 		fclose(input_file);
 	}
 
@@ -1340,13 +1375,13 @@ consume_special_event (nvmi_event_t * evt)
 	assert (cbi);
 	assert (cbi->cb_type == NVMI_CALLBACK_SPECIAL);
 
-	clog_info (CLOG(CLOGGER_ID), "special event %s occurred in pid=%d comm=%s",
+	nvmi_info ("special event %s occurred in pid=%d comm=%s",
 		   cbi->name, evt->task->pid, evt->task->comm);
 
 	if (cbi == &nvmi_special_cbs[NVMI_DO_EXIT_IDX])
 	{
 		// handle process destruction
-		clog_info (CLOG(CLOGGER_ID), "exit of process pid %ld proc %s",
+		nvmi_info ("exit of process pid %ld proc %s",
 			   evt->task->pid, evt->task->comm);
 
 		populate_outbound_event (evt, EVENT_TYPE_PROCESS_DEATH, &event);
@@ -1359,20 +1394,22 @@ consume_special_event (nvmi_event_t * evt)
 		event_ready = true;
 
 		// Did brain ask for this destruction?
-		if (evt->task->pending_kill_request_id) {
+		if (evt->task->pending_kill_request_id)
+		{
 			response_t res = {0};
 			res.id = htobe64 (evt->task->pending_kill_request_id);
 			res.status = htobe32 (0);
 
-			clog_info (CLOG(CLOGGER_ID), "Kill of process pid=%d succeeded", evt->task->pid);
+			nvmi_info ("Kill of process pid=%d succeeded", evt->task->pid);
 
 			rc = zmq_send (gstate.zmq_request_socket, &res, sizeof(res), 0);
-			if (rc < 0) {
+			if (rc < 0)
+			{
 				rc = errno;
-				clog_warn (CLOG(CLOGGER_ID), "zmq_send() failed: %d", rc);
+				nvmi_warn ("zmq_send() failed: %d", rc);
 			}
 			//		if (evt->task->pid == gstate.killpid) {
-			//			clog_info (CLOG(CLOGGER_ID), "Kill of process pid=%d succeeded", evt->task->pid);
+			//			nvmi_info ("Kill of process pid=%d succeeded", evt->task->pid);
 			//			gstate.killpid = KILL_PID_NONE;
 		}
 
@@ -1406,8 +1443,9 @@ consume_special_event (nvmi_event_t * evt)
 	{
 		event.len = htobe32 (size);
 		rc = zmq_send (gstate.zmq_event_socket, &event, size, 0);
-		if (rc < 0) {
-			clog_warn (CLOG(CLOGGER_ID),"zmq_send() failed: %d", zmq_errno());
+		if (rc < 0)
+		{
+			nvmi_warn ("zmq_send() failed: %d", zmq_errno());
 		}
 	}
 
@@ -1442,10 +1480,12 @@ consume_syscall_event (nvmi_event_t * evt)
 	strncpy (event.u.syscall.name, cbi->name, sizeof(event.u.syscall.name));
 	event.u.syscall.arg_ct = htobe32 (cbi->argct);
 
-	for (int i = 0; i < cbi->argct; ++i) {
+	for (int i = 0; i < cbi->argct; ++i)
+	{
 		reg_t val = evt->r.syscall_args[i];
 
-		switch (cbi->args[i].type) {
+		switch (cbi->args[i].type)
+		{
 		case NVMI_ARG_TYPE_STR: { // char *
 			uint8_t * bytes = &(evt->mem[ evt->mem_ofs[i] ]);
 			size_t len = MIN (evt->arg_lens[i], sizeof(event.u.syscall.data) - dataofs);
@@ -1475,7 +1515,8 @@ consume_syscall_event (nvmi_event_t * evt)
 		}
 
 #if 0
-		case NVMI_ARG_TYPE_SA: {
+		case NVMI_ARG_TYPE_SA:
+		{
 
 			struct addrinfo_in6 ai;
 			struct addrinfo *res;
@@ -1486,14 +1527,16 @@ consume_syscall_event (nvmi_event_t * evt)
 					      sizeof(ai),
 					      &ai,
 					      NULL);
-			if (VMI_FAILURE == status ) {
-				clog_warn (CLOG(CLOGGER_ID), "Failed to read addrinfo struct");
+			if (VMI_FAILURE == status )
+			{
+				nvmi_warn ("Failed to read addrinfo struct");
 				continue;
 			}
 
 			rc = getaddrinfo (NULL, NULL, (const struct addrinfo *) &ai, &res);
-			if (rc) {
-				clog_warn (CLOG(CLOGGER_ID), "Failed to decode addrinfo struct");
+			if (rc)
+			{
+				nvmi_warn ("Failed to decode addrinfo struct");
 				continue;
 			}
 
@@ -1531,7 +1574,7 @@ consume_syscall_event (nvmi_event_t * evt)
 			event.u.syscall.args[i].type = htobe32 (SYSCALL_ARG_TYPE_POLLFD);
 			break;
 		default:
-			//clog_info (CLOG(CLOGGER_ID), "\targ %d: %lx", i+1, val);
+			//nvmi_info ("\targ %d: %lx", i+1, val);
 			snprintf (buf2, sizeof(buf2), " %lx,", val);
 			strncat (buf, buf2, sizeof(buf) - strlen(buf) - 1);
 
@@ -1557,16 +1600,16 @@ consume_syscall_event (nvmi_event_t * evt)
 		rc = zmq_send (gstate.zmq_event_socket, &event, size, 0);
 		if (rc < 0)
 		{
-			clog_warn (CLOG(CLOGGER_ID),"zmq_send() failed: %d", zmq_errno());
+			nvmi_warn ("zmq_send() failed: %d", zmq_errno());
 		}
 	}
 
-	clog_info (CLOG(CLOGGER_ID), "%s", buf);
+	nvmi_info ("%s", buf);
 
 	// If the syscall triggers a process context reset, destroy it now to force rebuild.
 	if (cbi->state.reset_ctx)
 	{
-		clog_info (CLOG(CLOGGER_ID), "Invalidating context of task pid=%d", evt->task->pid);
+		nvmi_info ("Invalidating context of task pid=%d", evt->task->pid);
 
 		g_rw_lock_writer_lock (&gstate.context_lock);
 		g_hash_table_remove (gstate.context_lookup, (gpointer) evt->task->key);
@@ -1589,14 +1632,16 @@ nvmi_event_consumer (gpointer data)
 
 	int rc = 0;
 
-	clog_info (CLOG(CLOGGER_ID), "Begining event consumer loop");
+	nvmi_info ("Begining event consumer loop");
 	g_async_queue_ref (gstate.event_queue);
 
 	// Monitor gstate.interrupted
-	while (!gstate.interrupted || gstate.nif_busy) {
+	while (!gstate.interrupted || gstate.nif_busy)
+	{
 		nvmi_event_t * evt = (nvmi_event_t *)
 			g_async_queue_timeout_pop (gstate.event_queue, NVMI_EVENT_QUEUE_TIMEOUT_uS);
-		if (NULL == evt) {
+		if (NULL == evt)
+		{
 			// Nothing in queue. Is it time to return yet?
 			continue;
 		}
@@ -1628,11 +1673,12 @@ nvmi_event_consumer (gpointer data)
 	} // while
 
 exit:
-	clog_info (CLOG(CLOGGER_ID), "Completed event consumer loop");
+	nvmi_info ("Completed event consumer loop");
 
 	// Event socket
-	clog_info (CLOG(CLOGGER_ID), "Closing event socket");
-	if (gstate.zmq_event_socket) {
+	nvmi_info ("Closing event socket");
+	if (gstate.zmq_event_socket)
+	{
 		zmq_close (gstate.zmq_event_socket);
 	}
 	gstate.zmq_event_socket  = NULL;
@@ -1646,32 +1692,29 @@ static void
 nvmi_main_fini (void)
 {
 	// FIXME:
-	if (gstate.consumer_thread) {
-		clog_info (CLOG(CLOGGER_ID), "Giving consumer thread time to leave.");
+	if (gstate.consumer_thread)
+	{
+		nvmi_info ("Giving consumer thread time to leave.");
 		//g_thread_join (gstate.consumer_thread);
 		//usleep(1);
-		clog_info (CLOG(CLOGGER_ID), "Consumer thread joined");
+		nvmi_info ("Consumer thread joined");
 		gstate.consumer_thread = NULL;
 	}
-/*
-	// releasing queue causes event consumer to return
-	if (gstate.event_queue) {
-		//g_async_queue_unref (gstate.event_queue);
-		//gstate.event_queue = NULL;
-	}
-	clog_info (CLOG(CLOGGER_ID), "Event queue dereferenced");
-*/
-	if (gstate.context_lookup) {
+
+	// N.B. releasing queue causes event consumer to return
+
+	if (gstate.context_lookup)
+	{
 		g_rw_lock_writer_lock (&gstate.context_lock);
 
 		g_hash_table_destroy (gstate.context_lookup);
 		gstate.context_lookup = NULL;
 
 		g_rw_lock_writer_unlock (&gstate.context_lock);
-		clog_info (CLOG(CLOGGER_ID), "Context lookup table destroyed");
+		nvmi_info ("Context lookup table destroyed");
 	}
 
-	clog_info (CLOG(CLOGGER_ID), "main cleanup complete");
+	nvmi_info ("main cleanup complete");
 }
 
 static int
@@ -1691,7 +1734,8 @@ nvmi_main_init (void)
 	sigaction(SIGALRM, &gstate.act, NULL);
 
 	rc = nif_get_vmi (&vmi);
-	if (rc) {
+	if (rc)
+	{
 		goto exit;
 	}
 
@@ -1707,8 +1751,9 @@ nvmi_main_init (void)
 	status |= vmi_get_kernel_struct_offset (vmi, "task_struct", "mm",   &gstate.task_mm_ofs);
 	status |= vmi_get_kernel_struct_offset (vmi, "mm_struct",   "pgd",  &gstate.mm_pgd_ofs);
 
-	if (VMI_FAILURE == status) {
-		clog_warn (CLOG(CLOGGER_ID), "Failed to get offset");
+	if (VMI_FAILURE == status)
+	{
+		nvmi_warn ("Failed to get offset");
 		rc = EIO;
 		goto exit;
 	}
@@ -1719,13 +1764,15 @@ nvmi_main_init (void)
 
 #if !defined(ARM64)
 	status = vmi_translate_ksym2v(vmi, "per_cpu__current_task", &gstate.va_current_task);
-	if (VMI_FAILURE == status) {
+	if (VMI_FAILURE == status)
+	{
 		status = vmi_translate_ksym2v(vmi, "current_task", &gstate.va_current_task);
 	}
 
-	if (VMI_FAILURE == status) {
+	if (VMI_FAILURE == status)
+	{
 		rc = EIO;
-		clog_warn (CLOG(CLOGGER_ID),"Error could get the current_task offset.");
+		nvmi_warn ("Error could get the current_task offset.");
 		goto exit;
 	}
 	assert (gstate.va_current_task);
@@ -1760,7 +1807,7 @@ comms_request_servicer (gpointer data)
 				continue;
 			}
 			// Otherwise, fatal...
-			clog_info (CLOG(CLOGGER_ID), "Request servicer thread bailing out");
+			nvmi_info ("Request servicer thread bailing out");
 			break;
 		}
 
@@ -1773,15 +1820,16 @@ comms_request_servicer (gpointer data)
 		switch (req.cmd)
 		{
 		case REQUEST_CMD_PROCKILL:
-			clog_warn (CLOG(CLOGGER_ID), "Received request %lx to kill PID %d", req.id, req.arg1);
+			nvmi_warn ("Received request %lx to kill PID %d", req.id, req.arg1);
 
 			// Set global killpid: now syscall hook will watch for this pid
 			rc = find_task_context_by_pid (req.arg1, &task);
-			if (rc) {
+			if (rc)
+			{
 				res.id = htobe64 (req.id);
 				res.status = htobe32 (rc);
 				response_created = true;
-				clog_warn (CLOG(CLOGGER_ID), "Request %lx indicated invalid PID %d: %d",
+				nvmi_warn ("Request %lx indicated invalid PID %d: %d",
 					   req.id, req.arg1, rc);
 				break;
 			}
@@ -1790,7 +1838,7 @@ comms_request_servicer (gpointer data)
 			break;
 
 		case REQUEST_CMD_SET_EVENT_LIMIT:
-			clog_warn (CLOG(CLOGGER_ID), "Received request %lx to set event limit to %d", req.arg1);
+			nvmi_warn ("Received request %lx to set event limit to %d", req.arg1);
 			res.id = htobe64 (req.id);
 			res.status = htobe32 (0);
 			response_created = true;
@@ -1803,19 +1851,21 @@ comms_request_servicer (gpointer data)
 		if (response_created)
 		{
 			rc = zmq_send (gstate.zmq_request_socket, &res, sizeof(res), 0);
-			if (rc < 0) {
+			if (rc < 0)
+			{
 				rc = errno;
-				clog_warn (CLOG(CLOGGER_ID), "zmq_send() failed: %d", rc);
+				nvmi_warn ("zmq_send() failed: %d", rc);
 			}
 		}
 	} // while
 
 exit:
-	clog_info (CLOG(CLOGGER_ID), "Request servicer thread returning");
+	nvmi_info ("Request servicer thread returning");
 
 	// Request socket
-	clog_info (CLOG(CLOGGER_ID), "Closing request socket");
-	if (gstate.zmq_request_socket) {
+	nvmi_info ("Closing request socket");
+	if (gstate.zmq_request_socket)
+	{
 		zmq_close (gstate.zmq_request_socket);
 	}
 	gstate.zmq_request_socket  = NULL;
@@ -1827,33 +1877,36 @@ exit:
 static void
 comms_fini(void)
 {
-	if (!gstate.use_comms) {
+	if (!gstate.use_comms)
+	{
 		return;
 	}
 
-	clog_info (CLOG(CLOGGER_ID), "Beginning comms shutdown");
+	nvmi_info ("Beginning comms shutdown");
 
 	// ZMQ context
-	if (gstate.zmq_context) {
+	if (gstate.zmq_context)
+	{
 		// Notify all threads using ZMQ comms to stop and
 		// close their respective sockets. zmq_term() waits
 		// for all sockets opened with given context to be
 		// closed.
 		zmq_term (gstate.zmq_context);
-		clog_info (CLOG(CLOGGER_ID), "All ZMQ sockets closed");
+		nvmi_info ("All ZMQ sockets closed");
 		zmq_ctx_destroy (gstate.zmq_context);
 	}
 	gstate.zmq_context = NULL;
 
 	// Request servicer thread
-	clog_info (CLOG(CLOGGER_ID), "Joining request servicer");
-	if (gstate.request_service_thread) {
+	nvmi_info ("Joining request servicer");
+	if (gstate.request_service_thread)
+	{
 		g_thread_join (gstate.request_service_thread);
 	}
 	gstate.request_service_thread = NULL;
 
 
-	clog_info (CLOG(CLOGGER_ID), "Comms shutdown complete");
+	nvmi_info ("Comms shutdown complete");
 }
 
 static int
@@ -1861,43 +1914,49 @@ comms_init(void)
 {
 	int rc = 0;
 
-	if (!gstate.use_comms) {
+	if (!gstate.use_comms)
+	{
 		goto exit;
 	}
 
 	// ZMQ context
 	gstate.zmq_context = zmq_ctx_new();
-	if (NULL == gstate.zmq_context) {
+	if (NULL == gstate.zmq_context)
+	{
 		rc = errno;
-		clog_warn (CLOG(CLOGGER_ID), "zmq_ctx_new() failed");
+		nvmi_warn ("zmq_ctx_new() failed");
 		goto exit;
 	}
 
 	// Event socket
 	gstate.zmq_event_socket = zmq_socket (gstate.zmq_context, ZMQ_PAIR);
-	if (NULL == gstate.zmq_event_socket) {
+	if (NULL == gstate.zmq_event_socket)
+	{
 		rc = zmq_errno();
-		clog_warn (CLOG(CLOGGER_ID), "zmq_socket() failed");
+		nvmi_warn ("zmq_socket() failed");
 		goto exit;
 	}
 
 	rc = zmq_bind (gstate.zmq_event_socket, ZMQ_EVENT_CHANNEL);
-	if (rc) {
-		clog_warn (CLOG(CLOGGER_ID), "zmq_bind(" ZMQ_EVENT_CHANNEL ") failed: %d", rc);
+	if (rc)
+	{
+		nvmi_warn ("zmq_bind(" ZMQ_EVENT_CHANNEL ") failed: %d", rc);
 		goto exit;
 	}
 
 	// Request socket
 	gstate.zmq_request_socket = zmq_socket (gstate.zmq_context, ZMQ_PAIR);
-	if (NULL == gstate.zmq_request_socket) {
+	if (NULL == gstate.zmq_request_socket)
+	{
 		rc = zmq_errno();
-		clog_warn (CLOG(CLOGGER_ID), "zmq_socket() failed: %d", rc);
+		nvmi_warn ("zmq_socket() failed: %d", rc);
 		goto exit;
 	}
 
 	rc = zmq_connect (gstate.zmq_request_socket, ZMQ_REQUEST_CHANNEL);
-	if (rc) {
-		clog_warn (CLOG(CLOGGER_ID), "zmq_connect(" ZMQ_REQUEST_CHANNEL ") failed: %d", rc);
+	if (rc)
+	{
+		nvmi_warn ("zmq_connect(" ZMQ_REQUEST_CHANNEL ") failed: %d", rc);
 		goto exit;
 	}
 
@@ -1924,8 +1983,10 @@ main (int argc, char* argv[])
 
 	gstate.use_comms = true;
 
-	while ((opt = getopt(argc, argv, ":o:svd")) != -1) {
-		switch (opt) {
+	while ((opt = getopt(argc, argv, ":o:svd")) != -1)
+	{
+		switch (opt)
+		{
 		case 'o':
 			log_file = optarg;
 			break;
@@ -1945,7 +2006,8 @@ main (int argc, char* argv[])
 		}
 	}
 
-	if (help || argc - optind != 2) {
+	if (help || argc - optind != 2)
+	{
 		printf("*** Numen Introspection Framework v2.0 ***\n\n");
 		printf("Usage:\n");
 		printf("%s [-v] [-o logfile] <domain name> <path to system_map>\n", argv[0]);
@@ -1956,34 +2018,40 @@ main (int argc, char* argv[])
 		return 1;
 	}
 
-	if (logger_init(log_file, verbosity)) {
+	if (logger_init(log_file, verbosity))
+	{
 		goto exit;
 	}
 
 	// Returns with VM suspended
 	rc = nif_init (argv[optind], (bool *) &gstate.nif_busy);
-	if (rc) {
+	if (rc)
+	{
 		goto exit;
 	}
 
 	rc = nvmi_main_init ();
-	if (rc) {
+	if (rc)
+	{
 		goto exit;
 	}
 
 	rc = comms_init();
-	if (rc) {
+	if (rc)
+	{
 		goto exit;
 	}
 
 	rc = set_instrumentation_points (argv[optind+1]);
-	if (rc) {
+	if (rc)
+	{
 		goto exit;
 	}
 
 	// Resumes the VM, but returns with it paused
 	rc = nif_event_loop();
-	if (rc) {
+	if (rc)
+	{
 		goto exit;
 	}
 
@@ -1995,7 +2063,7 @@ exit:
 
 	nvmi_main_fini();
 	comms_fini();
-	clog_info (CLOG(CLOGGER_ID), "Main completed");
+	nvmi_info ("Main completed");
 
 	logger_fini();
 	return rc;
