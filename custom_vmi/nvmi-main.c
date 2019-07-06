@@ -950,7 +950,7 @@ cb_update_trigger_state (nvmi_cb_info_t * cbi,
 		unsigned long pct = atomic_dec (&gstate.triggered_procs);
 		clog_info (CLOG(CLOGGER_ID),
 			   "Dropping trigger: event %s proc %s", cbi->name, task->comm);
-		task->triggered = false;		
+		task->triggered = false;
 		task->events_since_trigger = 0;
 
 		if (0 == pct)
@@ -959,7 +959,7 @@ cb_update_trigger_state (nvmi_cb_info_t * cbi,
 			new_level = NVMI_MONITOR_LEVEL_TRIGGERS;
 		}
 	}
-	
+
 	if (NVMI_MONITOR_LEVEL_UNSET != new_level)
 	{
 		nif_set_level (new_level);
