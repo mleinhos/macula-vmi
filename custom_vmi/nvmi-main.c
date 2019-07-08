@@ -36,6 +36,7 @@
 #include <endian.h>
 
 #include <zmq.h>
+#include <json-c/json.h>
 
 #define CLOG_MAIN 1
 #include "clog.h"
@@ -107,6 +108,10 @@ typedef struct _nvmi_state {
 	addr_t task_ppid_ofs;
 	addr_t task_mm_ofs;
 	addr_t mm_pgd_ofs;
+
+	// Rekall profile info
+	const char * symbol_source_file;
+	struct json_object * rekall_root;
 
 	addr_t va_current_task;
 
@@ -1125,7 +1130,7 @@ cb_post_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 
 
 static int
-instrument_special_point (const char *name, addr_t kva)
+instrument_special_point (char *name, addr_t kva)
 {
 	int rc = ENOENT;
 	nvmi_cb_info_t * cbi = NULL;
@@ -1155,6 +1160,9 @@ instrument_syscall (char *name, addr_t kva)
 	int rc = 0;
 	nvmi_cb_info_t * cbi = NULL;
 	bool monitored = false;
+	// Point to the base (legacy style) of the syscall name,
+	// e.g. "sys_accept", from within __x64_sys_accept
+	char * lookup = NULL;
 
 	static bool prediscovery = false;
 	static size_t nvmi_syscall_new = 0; // where to put new (incomplete) entries into table?
@@ -1177,7 +1185,15 @@ instrument_syscall (char *name, addr_t kva)
 		name[i] = (char) tolower(name[i]);
 	}
 
-	if (strncmp (name, "sys_", 4))
+	if (!strncmp (name, "sys_", 4))
+	{
+		lookup = name; // point to sys_*
+	}
+	else if (!strncmp (name, "__x64_sys_", 10))
+	{
+		lookup = &name[6]; // point to sys_*
+	}
+	else
 	{
 		// mismatch
 		rc = ENOENT;
@@ -1202,7 +1218,13 @@ instrument_syscall (char *name, addr_t kva)
 	//
 	// We have a syscall
 	//
-
+	if (strlen (name) >= SYSCALL_MAX_NAME_LEN)
+	{
+		// Report a mismatch so the whole init doesn't fail
+		rc = ENOENT;
+		nvmi_error ("Symbol '%s' is too long", name);
+		goto exit;
+	}
 
 	// Bail if we're already monitoring that point
 	rc = nif_is_monitored (kva, &monitored);
@@ -1228,7 +1250,7 @@ instrument_syscall (char *name, addr_t kva)
 	// We've found a syscall, and we have its address. Now, find it in our syscall table
 	for (int i = 0; i < nvmi_syscall_new; ++i)
 	{
-		if (!strcmp(name, nvmi_syscalls[i].name))
+		if (!strcmp(lookup, nvmi_syscalls[i].name))
 		{
 			cbi = &nvmi_syscalls[i];
 			break;
@@ -1267,67 +1289,146 @@ exit:
 }
 
 
-// TODO: move to rekall
-// TODO: handle KASLR
+/**
+ * Attempts to match the given symbol to a special instrumentation
+ * point of a syscall. If it matched, returns 0. If it doesn't match,
+ * returns ENOENT. Otherwise, returns another error code.
+ */
 static int
-set_instrumentation_points (const char* mappath)
+set_instr_point (char * symname,
+		 addr_t kva)
+{
+	int rc = 0;
+
+	rc = instrument_special_point (symname, kva);
+	if (0 == rc)
+	{
+		// success: this is an special point
+		goto exit;
+	}
+	else if (ENOENT != rc)
+	{
+		// failure for reason other than line mismatch
+		goto exit;
+	}
+
+	// Otherwise, try to match with a syscall
+	rc = instrument_syscall (symname, kva);
+	if (0 == rc)
+	{
+		// success: this is a syscall
+		goto exit;
+	}
+	else if (ENOENT != rc)
+	{
+		// failure for reason other than line mismatch
+		goto exit;
+	}
+
+exit:
+	return rc;
+}
+
+
+static int
+set_instr_points_rekall (void)
+{
+	int rc = 0;
+	struct json_object * rekall = NULL;
+	struct json_object * structs = NULL;
+	struct json_object * constants = NULL;
+	struct json_object_iterator it;
+	struct json_object_iterator it_end;
+
+	if (!json_object_object_get_ex (gstate.rekall_root, "$CONSTANTS", &constants))
+	{
+		rc = EINVAL;
+		fprintf (stderr, "Failed to find $CONSTANTS section\n");
+		goto exit;
+	}
+
+	it = json_object_iter_begin (constants);
+	it_end = json_object_iter_end (constants);
+
+	while (!json_object_iter_equal (&it, &it_end))
+	{
+		char * symname = (char *) json_object_iter_peek_name(&it);
+		unsigned long kva = json_object_get_int64(json_object_iter_peek_value(&it));
+
+		if (NULL == strstr (symname, "sys"))
+		{
+			json_object_iter_next (&it);
+			continue;
+		}
+
+		// make the addr canonical
+		if ( VMI_GET_BIT(kva, 47) )
+		{
+			kva |= 0xffff000000000000;
+		}
+//		printf ("%s: %p\n", symname, va);
+		rc = set_instr_point (symname, kva);
+		if (rc != 0 && rc != ENOENT)
+		{
+			nvmi_warn ("Failed on symbol %s", symname);
+			goto exit;
+		}
+		
+		json_object_iter_next (&it);
+	}
+
+	nvmi_info ("Found %d syscalls to monitor", gstate.act_calls);
+	rc = 0;
+
+exit:
+	return rc;
+}
+
+
+static int
+set_instr_points_mapfile (void)
 {
 	FILE* input_file = NULL;
 	char one_line[1024];
 	char * nl = NULL;
 	int rc = 0;
 
-	input_file = fopen(mappath, "r+");
+	assert (NULL == gstate.rekall_root);
+
+	input_file = fopen(gstate.symbol_source_file, "r+");
 	if (NULL == input_file)
 	{
 		rc = EINVAL;
-		nvmi_warn ("Can't open system map file '%s'", mappath);
+		nvmi_warn ("Can't open system map file '%s'", gstate.symbol_source_file);
 		goto exit;
 	}
 
 	while (fgets( one_line, sizeof(one_line), input_file) != NULL)
 	{
-		char * name = NULL;
+		char * symname = NULL;
 		addr_t kva = 0;
 
 		// sample line: "ffffffff81033570 T sys_mmap"
-		name = strstr(one_line, " T ");
-		if (NULL == name) { // find the global text section symbols
+		symname = strstr(one_line, " T ");
+		if (NULL == symname) { // find the global text section symbols
 			continue;
 		}
-		*name = '\0';
-		name += 3;
+		*symname = '\0';
+		symname += 3;
 
 		// overwrite EOL with NULL char
-		if (NULL != (nl = strchr(name, '\n')))
+		if (NULL != (nl = strchr(symname, '\n')))
+		{
 			*nl='\0';
+		}
 
 		// line: "ffffffff81033570\0T sys_mmap\0"
 		kva = (addr_t) strtoul(one_line, NULL, 16);
 
-		//printf ("symbol: %s, addr %lx\n", name, kva);
-		//if (0 == strcmp("sys_sendmsg", name)) { __asm__("int $3");}
-
-		rc = instrument_special_point (name, kva);
-		if (0 == rc)
+		// success if this is not an instrumented point
+		rc = set_instr_point (symname, kva);
+		if (rc != 0 && rc != ENOENT)
 		{
-			continue; // success
-		}
-		else if (ENOENT != rc)
-		{
-			// failure for reason other than line mismatch
-			goto exit;
-		}
-
-		// Otherwise, try to match with a syscall
-		rc = instrument_syscall (name, kva);
-		if (0 == rc)
-		{
-			continue; // success
-		}
-		else if (ENOENT != rc)
-		{
-			// failure for reason other than line mismatch
 			goto exit;
 		}
 	} // while
@@ -1342,6 +1443,21 @@ exit:
 	}
 
 	return rc;
+}	
+
+
+// TODO: handle KASLR
+static int
+set_instrumentation_points (void)
+{
+	if (NULL == gstate.rekall_root)
+	{
+		return set_instr_points_mapfile();
+	}
+	else
+	{
+		return set_instr_points_rekall();
+	}
 }
 
 
@@ -1716,6 +1832,12 @@ nvmi_main_fini (void)
 		nvmi_info ("Context lookup table destroyed");
 	}
 
+	if (gstate.rekall_root)
+	{
+		json_object_put (gstate.rekall_root);
+		gstate.rekall_root = NULL;
+	}
+	
 	nvmi_info ("main cleanup complete");
 }
 
@@ -1734,6 +1856,15 @@ nvmi_main_init (void)
 	sigaction(SIGTERM, &gstate.act, NULL);
 	sigaction(SIGINT,  &gstate.act, NULL);
 	sigaction(SIGALRM, &gstate.act, NULL);
+
+	gstate.rekall_root = json_object_from_file (gstate.symbol_source_file);
+	if (NULL == gstate.rekall_root)
+	{
+		fprintf (stderr, "File %s is not a REKALL profile. Treating it as a Symbol map.\n",
+			 gstate.symbol_source_file);
+		nvmi_warn ("Treating file '%s' as Symbol map - it doesn't parse as a REKALL profile.",
+			 gstate.symbol_source_file);
+	}
 
 	rc = nif_get_vmi (&vmi);
 	if (rc)
@@ -1976,8 +2107,7 @@ main (int argc, char* argv[])
 {
 	int rc = 0;
 	status_t status;
-	const char* name = argv[1];
-	const char* in_path = argv[2];
+	const char* domu = NULL;
 	int opt = 0;
 	int verbosity = 0;
 	char * log_file = NULL;
@@ -2020,13 +2150,16 @@ main (int argc, char* argv[])
 		return 1;
 	}
 
+	domu = argv [optind];
+	gstate.symbol_source_file = argv [optind + 1];
+
 	if (logger_init(log_file, verbosity))
 	{
 		goto exit;
 	}
 
 	// Returns with VM suspended
-	rc = nif_init (argv[optind], (bool *) &gstate.nif_busy);
+	rc = nif_init (domu, (bool *) &gstate.nif_busy);
 	if (rc)
 	{
 		goto exit;
@@ -2044,7 +2177,8 @@ main (int argc, char* argv[])
 		goto exit;
 	}
 
-	rc = set_instrumentation_points (argv[optind+1]);
+	rc = set_instrumentation_points ();
+	//rc = 4;
 	if (rc)
 	{
 		goto exit;
