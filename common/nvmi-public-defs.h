@@ -23,21 +23,17 @@
 #define SYSCALL_MAX_NAME_LEN 32
 #define SYSCALL_MAX_ARGS 6
 #define SYSCALL_MAX_ARG_BUF 1024
+//#define SYSCALL_MAX_ARG_BUF 16 // FOR DEBUGGING ONLY!!
 
-#define SOCKADDR_MAX_LEN 64 // TODO: get sizeof(struct sockaddr_in6)
+// TODO: Decide how to handle sockaddr struct. Maybe just translate to
+// ASCII in NInspector?
+#define SOCKADDR_MAX_LEN 16 // sizeof(struct in6_addr)
 
 #define NVMI_STRUCT_ATTRIBS __attribute__((packed))
-
-
-//typedef uint32_t length_t;
 
 // Our file descriptor: reduced in size for typical case
 typedef uint32_t nvmi_fd_t;
 
-
-// These indicate there's no data to point to
-//#define INVALID_LENGTH ((length_t)-1)
-//#define INVALID_OFFSET ((length_t)-1)
 #define INVALID_FILE_DESCRIPTOR ((nvmi_fd_t)-1)
 
 // Process ID: guaranteed unique during process lifetime. Once a

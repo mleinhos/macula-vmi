@@ -261,6 +261,26 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 		    { .type = NVMI_ARG_TYPE_PVOID } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_madvise", .argct = 3,
+	  .state = { .enabled = 1},
+	  .args = { { .type = NVMI_ARG_TYPE_PVOID },
+		    { .type = NVMI_ARG_TYPE_SCALAR },
+		    { .type = NVMI_ARG_TYPE_SCALAR } } },
+
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_mkdir", .argct = 2,
+	  .state = { .derefs = 1, .enabled = 1},
+	  .args = { { .type = NVMI_ARG_TYPE_STR },
+		    { .type = NVMI_ARG_TYPE_SCALAR } } },
+
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_mkdirat", .argct = 3,
+	  .state = { .derefs = 1, .enabled = 1},
+	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
+		    { .type = NVMI_ARG_TYPE_STR },
+		    { .type = NVMI_ARG_TYPE_SCALAR } } },
+
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
 	  .name = "sys_mmap", .argct = 6,
 	  .state = { .enabled = 1},
 	  .args = { { .type = NVMI_ARG_TYPE_PVOID },
@@ -271,7 +291,14 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
-	  .name = "sys_munmap", .argct = 3,
+	  .name = "sys_mprotect", .argct = 3,
+	  .state = { .enabled = 1},
+	  .args = { { .type = NVMI_ARG_TYPE_PVOID },
+		    { .type = NVMI_ARG_TYPE_SCALAR },
+		    { .type = NVMI_ARG_TYPE_SCALAR } } },
+
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_munmap", .argct = 2,
 	  .state = { .enabled = 1},
 	  .args = { { .type = NVMI_ARG_TYPE_PVOID },
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },

@@ -48,22 +48,16 @@ typedef uint16_t p2m_view_t;
 
 
 #if defined(ARM64)
-
 typedef uint32_t trap_val_t;
-
 #define TRAP_CODE 0xd4000003
 
 #else
 
-static vmi_event_t ss_event[MAX_VCPUS];
 typedef uint8_t trap_val_t;
-
 #define TRAP_CODE 0xcc
 
-#endif
+#endif // ARM64
 
-static int act_calls = 0;
-static GThread * event_loop_thread = NULL;
 
 struct _nif_hook_node;
 
@@ -73,7 +67,12 @@ typedef struct
 	libxl_ctx* xcx;
 	xc_interface* xci;
 	uint32_t domain_id;
+
 	vmi_instance_t vmi;
+
+	// Events
+	vmi_event_t main_event;
+	vmi_event_t ss_event[MAX_VCPUS];
 
 //	nvmi_level_t curr_level;
 	nvmi_level_t requested_level;
@@ -99,7 +98,7 @@ typedef struct
 	xen_pfn_t max_gpfn;
 
 	// Track the most recent hook node for each vCPU
-        struct _nif_hook_node* vcpu_hook_nodes[MAX_VCPUS];
+	struct _nif_hook_node* vcpu_hook_nodes[MAX_VCPUS];
 
 	GHashTable* pframe_sframe_mappings; //key:pframe
 
@@ -220,7 +219,7 @@ free_pg_hks_lst (gpointer data)
 			    MKADDR(hook_node->parent->shadow_frame, hook_node->offset));
 	}
 
-	g_free(hook_node);
+	g_free (hook_node);
 }
 
 
@@ -566,6 +565,7 @@ nif_enable_monitor (addr_t kva,
 		}
 
 #if defined(ARM64)
+		// Allocate SS frame too
 		shadow_frame_ss = ++(xa.max_gpfn);
 		rc = xc_domain_populate_physmap_exact (xa.xci, xa.domain_id, 1, 0, 0, (xen_pfn_t*)&shadow_frame_ss);
 		if (rc < 0)
@@ -625,7 +625,7 @@ nif_enable_monitor (addr_t kva,
 			goto exit;
 		}
 #endif
-		// Update the hks list
+		// Update the page node
 		pgnode                  = g_new0(nif_page_node, 1);
 		pgnode->shadow_frame    = shadow_frame;
 		pgnode->shadow_frame_ss = shadow_frame_ss; // Intel: this is ignored
@@ -655,7 +655,7 @@ nif_enable_monitor (addr_t kva,
 
 	// Write the trap/smc value(s): The first goes in the shadow
 	// page, the second (ARM only) goes in the SS page.
-	nvmi_debug ("Writing trap %x to PA %" PRIx64 ", backup1=%x",
+	nvmi_debug ("Writing trap %x to PA %" PRIx64 ", backup1=%x into active view",
 		    TRAP_CODE, MKADDR(shadow_frame, offset), orig1);
 	status  = write_trap_val_pa (xa.vmi, MKADDR(shadow_frame, offset), TRAP_CODE);
 #if defined(ARM64)
@@ -787,34 +787,25 @@ singlestep_cb(vmi_instance_t vmi, vmi_event_t* event)
 	return (VMI_EVENT_RESPONSE_TOGGLE_SINGLESTEP |
 		VMI_EVENT_RESPONSE_VMM_PAGETABLE_ID);
 }
-
+/*
 static int
 setup_ss_events (vmi_instance_t vmi)
 {
-	int vcpus = vmi_get_num_vcpus(vmi);
 	int rc = 0;
-
-	nvmi_info ("Domain vcpus=%d", vcpus);
-
-	if (0 == vcpus)
-	{
-		rc = EIO;
-		nvmi_error ("Failed to find the total VCPUs");
-		goto exit;
-	}
 
 	if (vcpus > MAX_VCPUS)
 	{
 		rc = EINVAL;
 		nvmi_error ("Guest VCPUS are greater than what we can support");
-			goto exit;
+		goto exit;
 	}
 
 	for (int i = 0; i < vcpus; i++)
 	{
 		SETUP_SINGLESTEP_EVENT (&ss_event[i], 1u << i, singlestep_cb, 0);
 
-		if (VMI_SUCCESS != vmi_register_event(vmi, &ss_event[i])) {
+		if (VMI_SUCCESS != vmi_register_event(vmi, &xa.ss_event[i]))
+		{
 			rc = EIO;
 			nvmi_error ("Failed to register SS event on VCPU %d: %d", i, rc);
 			goto exit;
@@ -823,6 +814,7 @@ setup_ss_events (vmi_instance_t vmi)
 exit:
 	return rc;
 }
+*/
 #endif
 
 #if !defined(ARM64)
@@ -895,6 +887,12 @@ destroy_views (void)
 		nvmi_error ("Failed to switch to default view");
 	}
 
+	if (xa.ss_view)
+	{
+		xc_altp2m_destroy_view (xa.xci, xa.domain_id, xa.ss_view);
+		xa.ss_view = 0;
+	}
+
 	if (xa.active_view)
 	{
 		xc_altp2m_destroy_view(xa.xci, xa.domain_id, xa.active_view);
@@ -907,12 +905,6 @@ destroy_views (void)
 		xa.trigger_view = 0;
 	}
 
-	if (xa.ss_view)
-	{
-		xc_altp2m_destroy_view (xa.xci, xa.domain_id, xa.ss_view);
-		xa.ss_view = 0;
-	}
-
 	if (0 != xc_altp2m_set_domain_state(xa.xci, xa.domain_id, 0))
 	{
 		nvmi_error ("Failed to disable altp2m for domain_id: %u", xa.domain_id);
@@ -922,6 +914,11 @@ destroy_views (void)
 
 #define MAX_LOCK_BREAK_ATTEMPTS 3
 
+/**
+ * Breaks a read lock on the given hook. This is needed on Intel in
+ * case the LibVMI events aren't torn down properly (and the SS
+ * callback isn't invoked).
+ */
 static void
 break_hook_lock (nif_hook_node * node)
 {
@@ -1011,7 +1008,7 @@ init_xen_monitor(const char* name)
 		goto clean;
 	}
 
-	if ( libxl_name_to_domid(xa.xcx, name, &xa.domain_id))
+	if (0 != libxl_name_to_domid(xa.xcx, name, &xa.domain_id))
 	{
 		rc = EINVAL;
 		nvmi_error ("Unable to get domain id for %s", name);
@@ -1032,7 +1029,6 @@ init_xen_monitor(const char* name)
 		goto clean;
 	}
 
-	//nvmi_info ("Max gfn:%" PRIx64 "",xa.max_gpfn);
 	return 0;
 
 clean:
@@ -1041,12 +1037,95 @@ clean:
 }
 
 
+static void
+unregister_main_event (void)
+{
+	vmi_clear_event (xa.vmi, &xa.main_event, NULL);
+}
+
+
+static void
+unregister_ss_events (void)
+{
+#if defined(X86_64)
+
+	(void) vmi_shutdown_single_step (xa.vmi);
+
+/*
+	int vcpus = vmi_get_num_vcpus(xa.vmi);
+
+	for (int i = 0; i < vcpus; i++)
+	{
+		vmi_clear_event (xa.vmi, &xa.ss_event[i], NULL);
+	}
+	*/
+#endif
+
+	return;
+}
+
+
+static int
+register_events (void)
+{
+	int rc = 0;
+	int vcpus = vmi_get_num_vcpus(xa.vmi);
+
+	if (0 == vcpus)
+	{
+		rc = EIO;
+		nvmi_error ("Failed to find the total VCPUs");
+		goto exit;
+	}
+	nvmi_info ("Domain vcpus=%d", vcpus);
+
+
+#if defined(ARM64)
+	// ARM: single event callback - privcall
+	
+	SETUP_PRIVCALL_EVENT (&xa.main_event, _internal_hook_cb);
+	if (VMI_SUCCESS != vmi_register_event(xa.vmi, &xa.main_event)) {
+		nvmi_error ("Unable to register privcall event");
+		goto exit;
+	}
+
+#else
+	// Intel: two event callbacks: single step and interrupt
+
+	for (int i = 0; i < vcpus; i++)
+	{
+		SETUP_SINGLESTEP_EVENT (&xa.ss_event[i], 1u << i, singlestep_cb, 0);
+
+		if (VMI_SUCCESS != vmi_register_event (xa.vmi, &xa.ss_event[i]))
+		{
+			rc = EIO;
+			nvmi_error ("Failed to register SS event on VCPU %d: %d", i, rc);
+			goto exit;
+		}
+	}
+
+#  if VMI_EVENTS_VERSION >= 0x6
+	SETUP_INTERRUPT_EVENT (&xa.main_event, _internal_hook_cb);
+#  else
+	SETUP_INTERRUPT_EVENT (&xa.main_event, 0, _internal_hook_cb);
+#  endif // VMI_EVENTS_VERSION
+
+	if (VMI_SUCCESS != vmi_register_event (xa.vmi, &xa.main_event))
+	{
+		nvmi_error ("Unable to register interrupt event");
+		goto exit;
+	}
+#endif // ARM64
+
+exit:
+	return rc;
+}
+
+
 static void *
 nif_event_loop_worker (void * arg)
 {
 	int rc = 0;
-	vmi_event_t main_event;
-	//vmi_event_t cr3_event;
 
 	*xa.ext_nif_busy = true;
 
@@ -1059,46 +1138,11 @@ nif_event_loop_worker (void * arg)
 
 	nvmi_info ("Starting VMI event loop");
 
-#if defined(ARM64)
-	SETUP_PRIVCALL_EVENT(&main_event, _internal_hook_cb);
-	main_event.data = &xa;
-	if (VMI_SUCCESS != vmi_register_event(xa.vmi, &main_event)) {
-		nvmi_error ("Unable to register privcall event");
-		goto exit;
-	}
-#else
-	rc = setup_ss_events(xa.vmi);
+	rc = register_events();
 	if (rc)
 	{
 		goto exit;
 	}
-
-#if VMI_EVENTS_VERSION >= 0x6
-	SETUP_INTERRUPT_EVENT (&main_event, _internal_hook_cb);
-#else
-	SETUP_INTERRUPT_EVENT (&main_event, 0, _internal_hook_cb);
-#endif
-
-	main_event.data = &xa;
-	if (VMI_SUCCESS != vmi_register_event (xa.vmi, &main_event))
-	{
-		nvmi_error ("Unable to register interrupt event");
-		goto exit;
-	}
-
-#if 0
-	// Not necessary: If we don't trust the user address space
-	// cache on a callback, we should invalidate it in the
-	// callback and not add another callback!
-	SETUP_REG_EVENT (&cr3_event, CR3, VMI_REGACCESS_W, 0, cr3_cb);
-	if (VMI_SUCCESS != vmi_register_event (xa.vmi, &cr3_event))
-	{
-		nvmi_error ("Failed to setup cr3 event");
-		goto exit;
-	}
-#endif
-
-#endif
 
 	nvmi_info ("Entering VMI event loop: resuming VM");
 	vmi_resume_vm (xa.vmi);
@@ -1114,13 +1158,31 @@ nif_event_loop_worker (void * arg)
 		}
 	}
 
-	// Flush out events (which require read lock) before locking down callbacks with write lock
-	nvmi_info ("Flushing out final events...");
-	(void) vmi_events_listen (xa.vmi, 1000);
-	nvmi_info ("...done. All events should be completed.");
-	allow_callbacks (false);
+	//
+	// Teardown is tricky, especially on Intel: do these steps in the right order....
+	//
+
+	nvmi_info ("Tearing down and flushing VMI events");
 
 	vmi_pause_vm (xa.vmi);
+
+	// Flush out events (which require read lock) before locking down callbacks with write lock
+	(void) vmi_events_listen (xa.vmi, 0);
+
+	// No more first-level callbacks (interrupts, initial SMCs)
+	unregister_main_event();
+
+	// Intel: Flush out SS events, then disable them
+	vmi_resume_vm (xa.vmi);
+	vmi_pause_vm (xa.vmi);
+	(void) vmi_events_listen (xa.vmi, 0);
+	unregister_ss_events();
+
+	// Now there should be no pending events and the VM should be in a good state
+	nvmi_info ("Resuming VM");
+	vmi_resume_vm(xa.vmi);
+
+	allow_callbacks (false);
 
 exit:
 	nvmi_info ("Exited VMI event loop");
@@ -1137,10 +1199,10 @@ void
 nif_fini(void)
 {
 	nvmi_info ("Waiting for Xen event loop to shut down...");
-	if (event_loop_thread)
+	if (xa.event_loop_thread)
 	{
-		g_thread_join (event_loop_thread);
-		event_loop_thread = NULL;
+		g_thread_join (xa.event_loop_thread);
+		xa.event_loop_thread = NULL;
 	}
 	nvmi_info ("Xen event loop has shut down...");
 
@@ -1168,9 +1230,6 @@ nif_fini(void)
 	destroy_views();
 
 	fini_xen_monitor();
-
-	nvmi_info ("Resuming VM");
-	vmi_resume_vm(xa.vmi);
 
 	vmi_destroy(xa.vmi);
 
@@ -1280,7 +1339,7 @@ nif_init(const char* name,
 		goto exit;
 	}
 
-	event_loop_thread = g_thread_new ("vmi_event_looper", nif_event_loop_worker, NULL);
+	xa.event_loop_thread = g_thread_new ("vmi_event_looper", nif_event_loop_worker, NULL);
 
 exit:
 	return rc;

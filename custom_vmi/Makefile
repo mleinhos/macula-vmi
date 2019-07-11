@@ -3,9 +3,15 @@ _arch = $(shell uname -m)
 CC = gcc
 
 CFLAGS = -I../common -I.
+CFLAGS += -DTRIGGER_EVENT_LIMIT=50000000
 
 #CFLAGS += -O3 -g
 CFLAGS += -O0 -ggdb
+
+CFLAGS += -D_FORTIFY_SOURCE=2
+#CFLAGS += -fsanitize=address
+#CFLAGS += -fsanitize=thread
+#CFLAGS += -fsanitize=leak
 
 TARGET = NInspector
 

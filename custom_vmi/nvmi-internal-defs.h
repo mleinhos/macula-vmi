@@ -9,12 +9,12 @@
 #ifndef NVMI_INTERNAL_DEFS_H
 #define NVMI_INTERNAL_DEFS_H
 
-#define NVMI_MAX_ARG_MEM 512
-
 #include <glib.h>
 #include <libvmi/libvmi.h>
 #include "nvmi-public-defs.h"
 #include "nvmi-common.h"
+
+#define NVMI_MAX_ARG_MEM SYSCALL_MAX_ARG_BUF
 
 
 /**

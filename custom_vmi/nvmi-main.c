@@ -67,7 +67,14 @@
 
 #define KILL_PID_NONE ((vmi_pid_t)-1)
 
-#define TRIGGER_EVENT_LIMIT (500)
+#ifndef TRIGGER_EVENT_LIMIT
+#  define TRIGGER_EVENT_LIMIT 500
+#endif // TRIGGER_EVENT_LIMIT
+
+#ifndef DUMP_STATS_INTERVAL
+#   define DUMP_STATS_INTERVAL 100000
+#endif //  DUMP_STATS_INTERVAL
+
 
 //
 // Special instrumentation points
@@ -201,12 +208,12 @@ exit:
 static void
 close_handler(int sig)
 {
-	nvmi_info ("Received notification to stop (%d), shutting down", sig);
+	nvmi_warn ("Received notification to stop (%d), shutting down", sig);
 	if (!gstate.interrupted)
 	{
 		gstate.interrupted = true;
-		(void) clog_set_level (CLOGGER_ID, CLOG_DEBUG);
-		nvmi_warn ("Set logging verbosity to DEBUG for teardown");
+		//(void) clog_set_level (CLOGGER_ID, CLOG_DEBUG);
+		//nvmi_warn ("Set logging verbosity to DEBUG for teardown");
 		nif_stop();
 	}
 }
@@ -457,6 +464,10 @@ cb_build_task_context (vmi_instance_t vmi,
 	char * pname = NULL;
 	addr_t task_mm = 0;
 	addr_t mm_pgd = 0;
+
+	vmi_v2pcache_flush (vmi, ~0);
+	vmi_pidcache_flush (vmi);
+	vmi_rvacache_flush (vmi);
 
 	*tinfo = g_slice_new0 (nvmi_task_info_t);
 
@@ -862,6 +873,55 @@ exit:
 }
 
 
+/**
+ *
+ * Reads the requested amount of memory, up to the end of the starting page.
+ */
+static int
+read_user_mem2 (IN vmi_instance_t vmi,
+		IN nvmi_task_info_t * task,
+		IN addr_t va,
+		OUT uint8_t * buf,
+		INOUT size_t * len)
+{
+#if defined(X86_64) || defined(EXPERIMENTAL_READ_USERMEM)
+	int rc = 0;
+	status_t status = VMI_SUCCESS;
+	int remaining = *len;
+	int ofs = va & (VMI_PS_4KB - 1);
+
+	// At most, read to the end of the page
+	int read_size = MIN (VMI_PS_4KB - ofs, *len);
+
+	access_context_t ctx = { .translate_mechanism = VMI_TM_PROCESS_DTB,
+				 .dtb = task->task_dtb,
+				 .addr = va };
+
+	if (0 == ctx.dtb)
+	{
+		rc = EINVAL;
+		nvmi_warn ("Failing request to read memory from proc %d, invalid DTB %" PRIx64 ".",
+			   task->pid, task->task_dtb);
+		goto exit;
+	}
+
+	status = vmi_read (vmi, &ctx, read_size, buf, len);
+	if (VMI_FAILURE == status)
+	{
+		rc = EIO;
+		nvmi_warn ("Error could read memory from proc %d, DTB %" PRIx64 ", VA %" PRIx64 ".",
+			   task->pid, task->task_dtb, va);
+		goto exit;
+	}
+
+exit:
+	return rc;
+#else
+	return ENOSYS;
+#endif	
+}
+
+
 static int
 cb_pre_instr_kill_process (vmi_instance_t vmi, nvmi_event_t * evt, vmi_event_t* vmi_event)
 {
@@ -989,6 +1049,75 @@ cb_update_trigger_state (nvmi_cb_info_t * cbi,
 
 
 /**
+ *
+ * Read string from user memory until: (1) NULL terminator is found,
+ * or (2) *len bytes have been exhausted. Works in conjunction with
+ * read_user_mem2() to avoid heap allocations and reading across page
+ * boundaries if possible.
+ */
+static inline int
+cb_read_user_str (IN vmi_instance_t vmi,
+		  IN nvmi_task_info_t * task,
+		  IN addr_t va,
+		  OUT uint8_t * buf,
+		  INOUT size_t * maxlen)
+{
+	int rc = 0;
+	size_t origmax = *maxlen;
+	size_t bytes_read = *maxlen;
+	size_t ofs = 0; // offset we should read from / into ?
+	size_t len = 0;
+
+	if (0 == origmax)
+	{
+		rc = EINVAL;
+		goto exit;
+	}
+
+	while (true)
+	{
+		len = 0;
+
+		if (0 == bytes_read)
+		{
+			break;
+		}
+
+		rc = read_user_mem2 (vmi, task, va + ofs, &buf[ofs], &bytes_read);
+		if (rc)
+		{
+			break;
+		}
+
+		// Find '\0'
+		len = strnlen (&buf[ofs], origmax - ofs);
+		if (len <= origmax - ofs)
+		{
+			*maxlen = ofs + len;
+			break; // found
+		}
+
+		// Keep looking; grab more memory if space
+
+		// We're at the end, and didn't find the NULL terminator!
+		if (ofs + len == origmax - 1)
+		{
+			// At end of buffer. Truncate?
+			buf[ofs + len] = '\0';
+			break;
+		}
+
+		// \0 wasn't found, and there's more to read
+		ofs += len;
+		bytes_read = origmax - ofs;
+	}
+
+exit:
+	return rc;
+}
+
+
+/**
  * cb_pre_instr_pt()
  *
  * Called as entry point to any event callback.
@@ -1001,6 +1130,8 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 	status_t status = VMI_SUCCESS;
 	nvmi_cb_info_t * cbi = (nvmi_cb_info_t *) arg;
 	nvmi_event_t * evt = NULL;
+	size_t rem = sizeof (evt->mem);
+	size_t len = 0;
 	int dataofs = 0;
 	static nvmi_task_info_t * prev_ctx = NULL;
 	static bool size_warning = false;
@@ -1020,9 +1151,6 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 	for (int i = 0; i < cbi->argct; ++i)
 	{
 		reg_t val = evt->r.syscall_args[i];
-		char * buf = NULL;
-
-		//nvmi_debug ("Syscall processing arg %d, val=%lx", i, val);
 
 		switch (cbi->args[i].type)
 		{
@@ -1032,18 +1160,16 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 		case NVMI_ARG_TYPE_FDSET:
 			break;
 		case NVMI_ARG_TYPE_STR:
-			buf = read_user_mem (vmi, evt, val, 0, 0);
-			if (NULL == buf)
+			rc = cb_read_user_str (vmi, evt->task, val, &evt->mem[dataofs], &rem);
+			if (rc)
 			{
-				nvmi_warn ("Failed to read str syscall arg");
 				continue;
 			}
 
 			evt->mem_ofs[i] = dataofs;
-			evt->arg_lens[i] = MIN(sizeof(evt->mem) - dataofs, strlen(buf));
-			strncpy (&evt->mem[dataofs], buf, evt->arg_lens[i]);
-			free (buf);
-			dataofs += evt->arg_lens[i];
+			evt->arg_lens[i] = rem;
+			dataofs += rem;
+			rem = sizeof(evt->mem) - dataofs;
 			break;
 		case NVMI_ARG_TYPE_SA:
 		{
@@ -1235,7 +1361,7 @@ instrument_syscall (char *name, addr_t kva)
 
 	if (monitored)
 	{
-		nvmi_info ("KVA %" PRIx64 " is alraedy monitored", kva);
+		nvmi_info ("KVA %" PRIx64 " (%s) is alraedy monitored", kva, name);
 		goto exit;
 	}
 
@@ -1585,7 +1711,7 @@ consume_syscall_event (nvmi_event_t * evt)
 	assert (cbi);
 	assert (cbi->cb_type == NVMI_CALLBACK_SYSCALL);
 
-	if (gstate.dump_stats && evt->id % 100000 == 0)
+	if (gstate.dump_stats && evt->id % DUMP_STATS_INTERVAL == 0)
 	{
 		dump_cb_stats();
 	}

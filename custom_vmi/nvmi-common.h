@@ -62,5 +62,11 @@ static inline atomic_t atomic_dec (atomic_t * val)
 }
 
 
+#define IN
+#define INOPT
+#define OUT
+#define OUTOPT
+#define INOUT
+#define INOUTOPT
 
 #endif // NVMI_COMMON_DEFS_H
