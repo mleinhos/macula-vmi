@@ -68,11 +68,10 @@ typedef struct
 	xc_interface* xci;
 	uint32_t domain_id;
 
+	// LibVMI iface, events
 	vmi_instance_t vmi;
-
-	// Events
 	vmi_event_t main_event;
-	vmi_event_t ss_event[MAX_VCPUS];
+	vmi_event_t ss_event[MAX_VCPUS]; // SS events: Intel only
 
 //	nvmi_level_t curr_level;
 	nvmi_level_t requested_level;
@@ -107,13 +106,18 @@ typedef struct
 	// Fast lookup for BP
 	GHashTable* gpa_hook_mappings; // GPA -> hook_node
 
+	GThread * event_loop_thread;
+
 	volatile bool interrupted;
 	sem_t start_loop;
 	sem_t loop_complete;
 	bool * ext_nif_busy;
 	int loop_status;
+} nif_globals_t;
 
-} nif_xen_monitor;
+
+static nif_globals_t gnif;
+
 
 // Track one page containing instrumentation point
 typedef struct _nif_page_node
@@ -178,7 +182,6 @@ typedef struct _nif_hook_node
 #endif
 } nif_hook_node;
 
-static nif_xen_monitor xa;
 
 static inline status_t
 write_trap_val_va (vmi_instance_t vmi, addr_t va, trap_val_t val)
@@ -186,11 +189,13 @@ write_trap_val_va (vmi_instance_t vmi, addr_t va, trap_val_t val)
 	return vmi_write_va (vmi, va, 0, sizeof(trap_val_t), &val, NULL);
 }
 
+
 static inline status_t
 write_trap_val_pa (vmi_instance_t vmi, addr_t pa, trap_val_t val)
 {
 	return vmi_write_pa (vmi, pa, sizeof(trap_val_t), &val, NULL);
 }
+
 
 static inline status_t
 read_trap_val_va (vmi_instance_t vmi, addr_t va, trap_val_t* val)
@@ -205,11 +210,11 @@ free_pg_hks_lst (gpointer data)
 	nif_hook_node* hook_node = data;
 	status_t status;
 
-	status = write_trap_val_pa (xa.vmi,
+	status = write_trap_val_pa (gnif.vmi,
 				    MKADDR(hook_node->parent->shadow_frame, hook_node->offset),
 				    hook_node->backup_val1);
 #if defined(ARM64)
-	status |= write_trap_val_pa (xa.vmi,
+	status |= write_trap_val_pa (gnif.vmi,
 				     MKADDR(hook_node->parent->orig_frame, hook_node->offset) + 4,
 				     hook_node->backup_val2);
 #endif
@@ -230,23 +235,23 @@ static inline p2m_view_t
 get_requested_view (bool in_ss)
 {
 	// A reasonable way to fail...
-	p2m_view_t nextv = xa.trigger_view;
+	p2m_view_t nextv = gnif.trigger_view;
 
 	if (in_ss)
 	{
 		// Secondary (singlestep) breakpoint: go to requested view
-		if (xa.interrupted)
+		if (gnif.interrupted)
 		{
 			nextv = ALTP2M_DEFAULT_VIEW;
 			goto exit;
 		}
-		switch (xa.requested_level)
+		switch (gnif.requested_level)
 		{
 		case NVMI_MONITOR_LEVEL_TRIGGERS:
-			nextv = xa.trigger_view;
+			nextv = gnif.trigger_view;
 			break;
 		case NVMI_MONITOR_LEVEL_ACTIVE:
-			nextv = xa.active_view;
+			nextv = gnif.active_view;
 			break;
 		default:
 			nvmi_error ("How to handle current state?");
@@ -256,7 +261,7 @@ get_requested_view (bool in_ss)
 	{
 		// Initial breakpoint: ARM goes to SS view, Intel to default
 #if defined(ARM64)
-		nextv = xa.ss_view;
+		nextv = gnif.ss_view;
 #else
 		nextv = ALTP2M_DEFAULT_VIEW;
 #endif
@@ -281,7 +286,7 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 	addr_t gpa = 0;
 
 	// If applicable, handle event from single step view.
-	if (event->slat_id == xa.ss_view)
+	if (event->slat_id == gnif.ss_view)
 	{
 		// Go back to "normal" view
 		event->slat_id = get_requested_view (true);
@@ -289,7 +294,7 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 		// Grab the hook node used to get us here to the
 		// secondary (SS) view. The rlock may have failed
 		// earlier; if so, don't invoke CB.
-		hook_node = xa.vcpu_hook_nodes [event->vcpu_id];
+		hook_node = gnif.vcpu_hook_nodes [event->vcpu_id];
 		assert (NULL != hook_node);
 
 		if (NULL != hook_node)
@@ -311,9 +316,9 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 
 	// Otherwise this is the initial hook. Lookup the guest physical addr.
 	gpa = MKADDR(event->privcall_event.gfn, event->privcall_event.offset);
-	hook_node = g_hash_table_lookup (xa.gpa_hook_mappings, GSIZE_TO_POINTER(gpa));
+	hook_node = g_hash_table_lookup (gnif.gpa_hook_mappings, GSIZE_TO_POINTER(gpa));
 
-	xa.vcpu_hook_nodes [event->vcpu_id] = hook_node;
+	gnif.vcpu_hook_nodes [event->vcpu_id] = hook_node;
 	if (NULL == hook_node)
 	{
 		nvmi_error ("No BP record found for this GPA %" PRIx64 ".", gpa);
@@ -337,7 +342,7 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 	// Since the trigger and active views share frames, sometimes
 	// we'll incur a notification in trigger view for a
 	// non-trigger CB. In that case, don't notify the user.
-	if (event->slat_id == xa.trigger_view && !hook_node->trigger)
+	if (event->slat_id == gnif.trigger_view && !hook_node->trigger)
 	{
 		nvmi_debug ("Ignoring non-trigger hook in trigger view: %s", hook_node->name);
 	}
@@ -366,9 +371,9 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 
 	// Lookup the guest physical addr.
 	gpa = MKADDR(event->interrupt_event.gfn, event->interrupt_event.offset);
-	hook_node = g_hash_table_lookup (xa.gpa_hook_mappings, GSIZE_TO_POINTER(gpa));
+	hook_node = g_hash_table_lookup (gnif.gpa_hook_mappings, GSIZE_TO_POINTER(gpa));
 
-	xa.vcpu_hook_nodes [event->vcpu_id] = hook_node;
+	gnif.vcpu_hook_nodes [event->vcpu_id] = hook_node;
 	if (NULL == hook_node)
 	{
 		nvmi_error ("No BP record found for this GPA %" PRIx64 ".", gpa);
@@ -388,7 +393,7 @@ _internal_hook_cb (vmi_instance_t vmi, vmi_event_t* event)
 	// Since the trigger and active views share frames, sometimes
 	// we'll incur a notification in trigger view for a
 	// non-trigger CB. In that case, don't notify the user.
-	if (event->slat_id == xa.trigger_view && !hook_node->trigger)
+	if (event->slat_id == gnif.trigger_view && !hook_node->trigger)
 	{
 		nvmi_debug ("Ignoring non-trigger hook in trigger view: %s", hook_node->name);
 	}
@@ -425,10 +430,10 @@ free_nif_page_node (gpointer data)
 			nif_hook_node * node = (nif_hook_node *) ihook->data;
 			addr_t gpa = MKADDR (pnode->orig_frame, node->offset);
 
-			if (g_hash_table_contains (xa.gpa_hook_mappings, GSIZE_TO_POINTER(gpa)))
+			if (g_hash_table_contains (gnif.gpa_hook_mappings, GSIZE_TO_POINTER(gpa)))
 			{
 				//nvmi_debug ("gpa->hook mapping: removing %s", node->name);
-				g_hash_table_remove (xa.gpa_hook_mappings, GSIZE_TO_POINTER(gpa));
+				g_hash_table_remove (gnif.gpa_hook_mappings, GSIZE_TO_POINTER(gpa));
 			}
 			else
 			{
@@ -442,25 +447,21 @@ free_nif_page_node (gpointer data)
 	}
 
 	// Stop monitoring
-	vmi_set_mem_event(xa.vmi,
-			  pnode->shadow_frame,
-			  VMI_MEMACCESS_N,
-			  xa.active_view);
+	vmi_set_mem_event (gnif.vmi, pnode->shadow_frame, VMI_MEMACCESS_N, gnif.active_view);
 
-	xc_altp2m_change_gfn (xa.xci, xa.domain_id, xa.active_view, pnode->shadow_frame, ALTP2M_DEFAULT_GFN);
-	xc_domain_decrease_reservation_exact (xa.xci,
-					      xa.domain_id,
+	xc_altp2m_change_gfn (gnif.xci, gnif.domain_id, gnif.active_view, pnode->shadow_frame, ALTP2M_DEFAULT_GFN);
+	xc_domain_decrease_reservation_exact (gnif.xci,
+					      gnif.domain_id,
 					      1, 0,
 					      (xen_pfn_t*)&pnode->shadow_frame);
 
 #if defined(ARM64)
-	xc_altp2m_change_gfn (xa.xci, xa.domain_id, xa.active_view, pnode->shadow_frame_ss, ALTP2M_DEFAULT_GFN);
-	xc_domain_decrease_reservation_exact (xa.xci,
-					      xa.domain_id,
+	xc_altp2m_change_gfn (gnif.xci, gnif.domain_id, gnif.active_view, pnode->shadow_frame_ss, ALTP2M_DEFAULT_GFN);
+	xc_domain_decrease_reservation_exact (gnif.xci,
+					      gnif.domain_id,
 					      1, 0,
 					      (xen_pfn_t*)&pnode->shadow_frame_ss);
 #endif
-
 	g_free (pnode);
 }
 
@@ -478,7 +479,7 @@ nif_is_monitored(addr_t kva, bool * monitored)
 
 	*monitored = false;
 
-	status = vmi_pagetable_lookup (xa.vmi, xa.kdtb, kva, &pa);
+	status = vmi_pagetable_lookup (gnif.vmi, gnif.kdtb, kva, &pa);
 	if (VMI_SUCCESS != status)
 	{
 		rc = EINVAL;
@@ -486,7 +487,7 @@ nif_is_monitored(addr_t kva, bool * monitored)
 		goto exit;
 	}
 
-	hook_node = g_hash_table_lookup (xa.gpa_hook_mappings, GSIZE_TO_POINTER(pa));
+	hook_node = g_hash_table_lookup (gnif.gpa_hook_mappings, GSIZE_TO_POINTER(pa));
 
 	*monitored = (NULL != hook_node);
 
@@ -519,9 +520,9 @@ nif_enable_monitor (addr_t kva,
 #endif
 
 	// Read orig values
-	status  = read_trap_val_va (xa.vmi, kva, &orig1);
+	status  = read_trap_val_va (gnif.vmi, kva, &orig1);
 #if defined(ARM64)
-	status |= read_trap_val_va (xa.vmi, kva+4, &orig2);
+	status |= read_trap_val_va (gnif.vmi, kva+4, &orig2);
 #endif
 	if (VMI_SUCCESS != status)
 	{
@@ -530,7 +531,7 @@ nif_enable_monitor (addr_t kva,
 		goto exit;
 	}
 
-	status = vmi_pagetable_lookup (xa.vmi, xa.kdtb, kva, &pa);
+	status = vmi_pagetable_lookup (gnif.vmi, gnif.kdtb, kva, &pa);
 	if (VMI_SUCCESS != status)
 	{
 		rc = EINVAL;
@@ -541,13 +542,13 @@ nif_enable_monitor (addr_t kva,
 	orig_frame = pa >> PG_OFFSET_BITS;
 	offset = pa % DOM_PAGE_SIZE;
 
-	shadow_frame = (addr_t) GPOINTER_TO_SIZE (g_hash_table_lookup(xa.pframe_sframe_mappings,
+	shadow_frame = (addr_t) GPOINTER_TO_SIZE (g_hash_table_lookup(gnif.pframe_sframe_mappings,
 								      GSIZE_TO_POINTER(orig_frame)));
 	if (0 == shadow_frame)
 	{
 		// Allocate frame if not already there
-		shadow_frame = ++(xa.max_gpfn);
-		rc = xc_domain_populate_physmap_exact (xa.xci, xa.domain_id, 1, 0, 0, (xen_pfn_t*)&shadow_frame);
+		shadow_frame = ++(gnif.max_gpfn);
+		rc = xc_domain_populate_physmap_exact (gnif.xci, gnif.domain_id, 1, 0, 0, (xen_pfn_t*)&shadow_frame);
 		if (rc < 0)
 		{
 			rc = ENOMEM;
@@ -556,7 +557,7 @@ nif_enable_monitor (addr_t kva,
 		}
 
 		// Update p2m mapping: active_view: frame --> shadow_frame
-		rc = xc_altp2m_change_gfn (xa.xci, xa.domain_id, xa.active_view, orig_frame, shadow_frame);
+		rc = xc_altp2m_change_gfn (gnif.xci, gnif.domain_id, gnif.active_view, orig_frame, shadow_frame);
 		if (rc)
 		{
 			rc = EACCES;
@@ -566,8 +567,8 @@ nif_enable_monitor (addr_t kva,
 
 #if defined(ARM64)
 		// Allocate SS frame too
-		shadow_frame_ss = ++(xa.max_gpfn);
-		rc = xc_domain_populate_physmap_exact (xa.xci, xa.domain_id, 1, 0, 0, (xen_pfn_t*)&shadow_frame_ss);
+		shadow_frame_ss = ++(gnif.max_gpfn);
+		rc = xc_domain_populate_physmap_exact (gnif.xci, gnif.domain_id, 1, 0, 0, (xen_pfn_t*)&shadow_frame_ss);
 		if (rc < 0)
 		{
 			rc = ENOMEM;
@@ -575,7 +576,7 @@ nif_enable_monitor (addr_t kva,
 			goto exit;
 		}
 
-		rc = xc_altp2m_change_gfn (xa.xci, xa.domain_id, xa.ss_view, orig_frame, shadow_frame_ss);
+		rc = xc_altp2m_change_gfn (gnif.xci, gnif.domain_id, gnif.ss_view, orig_frame, shadow_frame_ss);
 		if (rc)
 		{
 			rc = EACCES;
@@ -584,7 +585,7 @@ nif_enable_monitor (addr_t kva,
 		}
 #endif
 		// Record the new translation
-		g_hash_table_insert (xa.pframe_sframe_mappings,
+		g_hash_table_insert (gnif.pframe_sframe_mappings,
 				     GSIZE_TO_POINTER(orig_frame), GSIZE_TO_POINTER(shadow_frame));
 	}
 	else
@@ -595,11 +596,11 @@ nif_enable_monitor (addr_t kva,
 	// shadow_frame is now known
 	nvmi_debug ("shadow_frame %lx for va %lx", shadow_frame, kva);
 
-	pgnode = g_hash_table_lookup (xa.shadow_pnode_mappings, GSIZE_TO_POINTER(shadow_frame));
+	pgnode = g_hash_table_lookup (gnif.shadow_pnode_mappings, GSIZE_TO_POINTER(shadow_frame));
 	if (NULL == pgnode)
 	{
 		// Copy orig frame into shadow
-		status = vmi_read_pa (xa.vmi, MKADDR(orig_frame, 0), DOM_PAGE_SIZE, buff, &ret);
+		status = vmi_read_pa (gnif.vmi, MKADDR(orig_frame, 0), DOM_PAGE_SIZE, buff, &ret);
 		if (DOM_PAGE_SIZE != ret || status == VMI_FAILURE)
 		{
 			rc = EACCES;
@@ -607,7 +608,7 @@ nif_enable_monitor (addr_t kva,
 			goto exit;
 		}
 
-		status = vmi_write_pa (xa.vmi, MKADDR(shadow_frame, 0), DOM_PAGE_SIZE, buff, &ret);
+		status = vmi_write_pa (gnif.vmi, MKADDR(shadow_frame, 0), DOM_PAGE_SIZE, buff, &ret);
 		if (DOM_PAGE_SIZE != ret || status == VMI_FAILURE)
 		{
 			rc = EACCES;
@@ -617,7 +618,7 @@ nif_enable_monitor (addr_t kva,
 
 #if defined(ARM64)
 		// Copy orig into shadow SS
-		status = vmi_write_pa (xa.vmi, MKADDR(shadow_frame_ss, 0), DOM_PAGE_SIZE, buff, &ret);
+		status = vmi_write_pa (gnif.vmi, MKADDR(shadow_frame_ss, 0), DOM_PAGE_SIZE, buff, &ret);
 		if (DOM_PAGE_SIZE != ret || status == VMI_FAILURE)
 		{
 			rc = EACCES;
@@ -632,7 +633,7 @@ nif_enable_monitor (addr_t kva,
 		pgnode->orig_frame      = orig_frame;
 		pgnode->offset_bp_mappings = g_hash_table_new_full (NULL, NULL, NULL, free_pg_hks_lst);
 
-		g_hash_table_insert (xa.shadow_pnode_mappings,
+		g_hash_table_insert (gnif.shadow_pnode_mappings,
 				     GSIZE_TO_POINTER(shadow_frame),
 				     pgnode);
 	}
@@ -657,11 +658,11 @@ nif_enable_monitor (addr_t kva,
 	// page, the second (ARM only) goes in the SS page.
 	nvmi_debug ("Writing trap %x to PA %" PRIx64 ", backup1=%x into active view",
 		    TRAP_CODE, MKADDR(shadow_frame, offset), orig1);
-	status  = write_trap_val_pa (xa.vmi, MKADDR(shadow_frame, offset), TRAP_CODE);
+	status  = write_trap_val_pa (gnif.vmi, MKADDR(shadow_frame, offset), TRAP_CODE);
 #if defined(ARM64)
 	nvmi_debug ("ARM: Writing SS trap %x to PA %" PRIx64 ", backup2=%x",
 		    TRAP_CODE, MKADDR(shadow_frame_ss, offset) + 4, orig2);
-	status |= write_trap_val_pa (xa.vmi, MKADDR(shadow_frame_ss, offset) + 4, TRAP_CODE);
+	status |= write_trap_val_pa (gnif.vmi, MKADDR(shadow_frame_ss, offset) + 4, TRAP_CODE);
 #endif
 	if (VMI_SUCCESS != status)
 	{
@@ -678,7 +679,7 @@ nif_enable_monitor (addr_t kva,
 		nvmi_info ("Writing trap %s into trigger view", name);
 
 		// Update p2m mapping: trigger_view: frame --> shadow_frame
-		rc = xc_altp2m_change_gfn (xa.xci, xa.domain_id, xa.trigger_view, orig_frame, shadow_frame);
+		rc = xc_altp2m_change_gfn (gnif.xci, gnif.domain_id, gnif.trigger_view, orig_frame, shadow_frame);
 		if (rc)
 		{
 			rc = EACCES;
@@ -702,7 +703,7 @@ nif_enable_monitor (addr_t kva,
 #endif
 
 	g_hash_table_insert(pgnode->offset_bp_mappings, GSIZE_TO_POINTER(offset), hook_node);
-	g_hash_table_insert(xa.gpa_hook_mappings, GSIZE_TO_POINTER(pa), hook_node);
+	g_hash_table_insert(gnif.gpa_hook_mappings, GSIZE_TO_POINTER(pa), hook_node);
 
 exit:
 	return rc;
@@ -728,41 +729,37 @@ nif_set_level (nvmi_level_t level)
 
 	switch (level)
 	{
-	case   NVMI_MONITOR_LEVEL_TRIGGERS:
+	case NVMI_MONITOR_LEVEL_TRIGGERS:
 		lname = "TRIGGER";
 		break;
-	case   NVMI_MONITOR_LEVEL_ACTIVE:
+	case NVMI_MONITOR_LEVEL_ACTIVE:
 		lname = "ACTIVE";
 		break;
-	case   NVMI_MONITOR_LEVEL_PARANOID:
+	case NVMI_MONITOR_LEVEL_PARANOID:
 		lname = "PARANOID";
 		break;
-
-	case	NVMI_MONITOR_LEVEL_UNSET:
+	case NVMI_MONITOR_LEVEL_UNSET:
 	default:
 		nvmi_info ("Unexpected monitoring level requested: %d", level);
 		rc = EINVAL;
 		goto exit;
 	}
 
-	xa.requested_level = level;
+	gnif.requested_level = level;
 
 exit:
 	nvmi_info ("Requested monitoring level: %s", lname);
-
 	return rc;
 }
 
 
-
-
-#if !defined(ARM64)
+#if defined(X86_64)
 
 static event_response_t
 singlestep_cb(vmi_instance_t vmi, vmi_event_t* event)
 {
 
-	nif_hook_node* hook_node = xa.vcpu_hook_nodes [event->vcpu_id];
+	nif_hook_node* hook_node = gnif.vcpu_hook_nodes [event->vcpu_id];
 
 	assert (NULL != hook_node); // && true == hook_node->locked);
 	if (NULL != hook_node)
@@ -787,89 +784,28 @@ singlestep_cb(vmi_instance_t vmi, vmi_event_t* event)
 	return (VMI_EVENT_RESPONSE_TOGGLE_SINGLESTEP |
 		VMI_EVENT_RESPONSE_VMM_PAGETABLE_ID);
 }
-/*
-static int
-setup_ss_events (vmi_instance_t vmi)
-{
-	int rc = 0;
-
-	if (vcpus > MAX_VCPUS)
-	{
-		rc = EINVAL;
-		nvmi_error ("Guest VCPUS are greater than what we can support");
-		goto exit;
-	}
-
-	for (int i = 0; i < vcpus; i++)
-	{
-		SETUP_SINGLESTEP_EVENT (&ss_event[i], 1u << i, singlestep_cb, 0);
-
-		if (VMI_SUCCESS != vmi_register_event(vmi, &xa.ss_event[i]))
-		{
-			rc = EIO;
-			nvmi_error ("Failed to register SS event on VCPU %d: %d", i, rc);
-			goto exit;
-		}
-	}
-exit:
-	return rc;
-}
-*/
-#endif
-
-#if !defined(ARM64)
-
-static event_response_t
-cr3_cb(vmi_instance_t vmi, vmi_event_t* event)
-{
-	event->x86_regs->cr3 = event->reg_event.value;
-
-	// Flush process_related caches for clean start and
-	// consistency
-
-	// TODO: optimize this - perhaps just flush in event
-	// callbacks, when user memory will be interrogated
-
-	vmi_symcache_flush(vmi);
-	vmi_pidcache_flush(vmi);
-	vmi_v2pcache_flush(vmi, event->reg_event.previous);
-	vmi_rvacache_flush(vmi);
-
-	return VMI_EVENT_RESPONSE_NONE;
-}
-
-static event_response_t
-mem_intchk_cb (vmi_instance_t vmi, vmi_event_t* event)
-{
-	nvmi_info ("Integrity check served");
-
-	event->slat_id = 0;
-
-	return VMI_EVENT_RESPONSE_TOGGLE_SINGLESTEP
-	       | VMI_EVENT_RESPONSE_VMM_PAGETABLE_ID;
-}
 #endif
 
 
 static void
 fini_xen_monitor(void)
 {
-	if (xa.xcx)
+	if (gnif.xcx)
 	{
-		if (0 != libxl_ctx_free(xa.xcx))
+		if (0 != libxl_ctx_free(gnif.xcx))
 		{
 			nvmi_error ("Failed to close xl handle");
 		}
-		xa.xcx = NULL;
+		gnif.xcx = NULL;
 	}
 
-	if (xa.xci)
+	if (gnif.xci)
 	{
-		if (0 != xc_interface_close(xa.xci))
+		if (0 != xc_interface_close(gnif.xci))
 		{
 			nvmi_error ("Failed to close connection to xen interface");
 		}
-		xa.xci = NULL;
+		gnif.xci = NULL;
 	}
 }
 
@@ -877,37 +813,37 @@ fini_xen_monitor(void)
 static void
 destroy_views (void)
 {
-	if (NULL == xa.xci)
+	if (NULL == gnif.xci)
 	{
 		return;
 	}
 
-	if (0 != xc_altp2m_switch_to_view(xa.xci, xa.domain_id, ALTP2M_DEFAULT_VIEW))
+	if (0 != xc_altp2m_switch_to_view(gnif.xci, gnif.domain_id, ALTP2M_DEFAULT_VIEW))
 	{
 		nvmi_error ("Failed to switch to default view");
 	}
 
-	if (xa.ss_view)
+	if (gnif.ss_view)
 	{
-		xc_altp2m_destroy_view (xa.xci, xa.domain_id, xa.ss_view);
-		xa.ss_view = 0;
+		xc_altp2m_destroy_view (gnif.xci, gnif.domain_id, gnif.ss_view);
+		gnif.ss_view = 0;
 	}
 
-	if (xa.active_view)
+	if (gnif.active_view)
 	{
-		xc_altp2m_destroy_view(xa.xci, xa.domain_id, xa.active_view);
-		xa.active_view = 0;
+		xc_altp2m_destroy_view(gnif.xci, gnif.domain_id, gnif.active_view);
+		gnif.active_view = 0;
 	}
 
-	if (xa.trigger_view)
+	if (gnif.trigger_view)
 	{
-		xc_altp2m_destroy_view(xa.xci, xa.domain_id, xa.trigger_view);
-		xa.trigger_view = 0;
+		xc_altp2m_destroy_view(gnif.xci, gnif.domain_id, gnif.trigger_view);
+		gnif.trigger_view = 0;
 	}
 
-	if (0 != xc_altp2m_set_domain_state(xa.xci, xa.domain_id, 0))
+	if (0 != xc_altp2m_set_domain_state(gnif.xci, gnif.domain_id, 0))
 	{
-		nvmi_error ("Failed to disable altp2m for domain_id: %u", xa.domain_id);
+		nvmi_error ("Failed to disable altp2m for domain_id: %u", gnif.domain_id);
 	}
 }
 
@@ -953,7 +889,7 @@ allow_callbacks (bool allowed)
 	GList * pages = NULL;
 	GList * ipage = NULL;
 
-	pages = g_hash_table_get_values (xa.shadow_pnode_mappings);
+	pages = g_hash_table_get_values (gnif.shadow_pnode_mappings);
 
 	for (ipage = pages; ipage != NULL; ipage = ipage->next)
 	{
@@ -995,34 +931,34 @@ static int
 init_xen_monitor(const char* name)
 {
 	int rc = 0;
-	if (0 == (xa.xci = xc_interface_open(NULL, NULL, 0)))
+	if (0 == (gnif.xci = xc_interface_open(NULL, NULL, 0)))
 	{
 		nvmi_error ("Failed to open xen interface");
 		return EIO; // nothing to clean
 	}
 
-	if (libxl_ctx_alloc(&xa.xcx, LIBXL_VERSION, 0, NULL))
+	if (libxl_ctx_alloc(&gnif.xcx, LIBXL_VERSION, 0, NULL))
 	{
 		rc = ENOMEM;
 		nvmi_error ("Unable to create xl context");
 		goto clean;
 	}
 
-	if (0 != libxl_name_to_domid(xa.xcx, name, &xa.domain_id))
+	if (0 != libxl_name_to_domid(gnif.xcx, name, &gnif.domain_id))
 	{
 		rc = EINVAL;
 		nvmi_error ("Unable to get domain id for %s", name);
 		goto clean;
 	}
 
-	if (0 == (xa.orig_mem_size = vmi_get_memsize(xa.vmi)))
+	if (0 == (gnif.orig_mem_size = vmi_get_memsize(gnif.vmi)))
 	{
 		rc = EIO;
 		nvmi_error ("Failed to get domain memory size");
 		goto clean;
 	}
 
-	if (xc_domain_maximum_gpfn(xa.xci, xa.domain_id, &xa.max_gpfn) < 0)
+	if (xc_domain_maximum_gpfn(gnif.xci, gnif.domain_id, &gnif.max_gpfn) < 0)
 	{
 		rc = EIO;
 		nvmi_error ("Failed to get max gpfn for the domain");
@@ -1040,7 +976,7 @@ clean:
 static void
 unregister_main_event (void)
 {
-	vmi_clear_event (xa.vmi, &xa.main_event, NULL);
+	vmi_clear_event (gnif.vmi, &gnif.main_event, NULL);
 }
 
 
@@ -1049,14 +985,12 @@ unregister_ss_events (void)
 {
 #if defined(X86_64)
 
-	(void) vmi_shutdown_single_step (xa.vmi);
+	(void) vmi_shutdown_single_step (gnif.vmi);
 
 /*
-	int vcpus = vmi_get_num_vcpus(xa.vmi);
-
-	for (int i = 0; i < vcpus; i++)
+	for (int i = 0; i < vmi_get_num_vcpus(gnif.vmi); i++)
 	{
-		vmi_clear_event (xa.vmi, &xa.ss_event[i], NULL);
+		vmi_clear_event (gnif.vmi, &gnif.ss_event[i], NULL);
 	}
 	*/
 #endif
@@ -1069,7 +1003,7 @@ static int
 register_events (void)
 {
 	int rc = 0;
-	int vcpus = vmi_get_num_vcpus(xa.vmi);
+	int vcpus = vmi_get_num_vcpus(gnif.vmi);
 
 	if (0 == vcpus)
 	{
@@ -1082,9 +1016,10 @@ register_events (void)
 
 #if defined(ARM64)
 	// ARM: single event callback - privcall
-	
-	SETUP_PRIVCALL_EVENT (&xa.main_event, _internal_hook_cb);
-	if (VMI_SUCCESS != vmi_register_event(xa.vmi, &xa.main_event)) {
+
+	SETUP_PRIVCALL_EVENT (&gnif.main_event, _internal_hook_cb);
+	if (VMI_SUCCESS != vmi_register_event(gnif.vmi, &gnif.main_event))
+	{
 		nvmi_error ("Unable to register privcall event");
 		goto exit;
 	}
@@ -1094,9 +1029,9 @@ register_events (void)
 
 	for (int i = 0; i < vcpus; i++)
 	{
-		SETUP_SINGLESTEP_EVENT (&xa.ss_event[i], 1u << i, singlestep_cb, 0);
+		SETUP_SINGLESTEP_EVENT (&gnif.ss_event[i], 1u << i, singlestep_cb, 0);
 
-		if (VMI_SUCCESS != vmi_register_event (xa.vmi, &xa.ss_event[i]))
+		if (VMI_SUCCESS != vmi_register_event (gnif.vmi, &gnif.ss_event[i]))
 		{
 			rc = EIO;
 			nvmi_error ("Failed to register SS event on VCPU %d: %d", i, rc);
@@ -1105,12 +1040,12 @@ register_events (void)
 	}
 
 #  if VMI_EVENTS_VERSION >= 0x6
-	SETUP_INTERRUPT_EVENT (&xa.main_event, _internal_hook_cb);
+	SETUP_INTERRUPT_EVENT (&gnif.main_event, _internal_hook_cb);
 #  else
-	SETUP_INTERRUPT_EVENT (&xa.main_event, 0, _internal_hook_cb);
+	SETUP_INTERRUPT_EVENT (&gnif.main_event, 0, _internal_hook_cb);
 #  endif // VMI_EVENTS_VERSION
 
-	if (VMI_SUCCESS != vmi_register_event (xa.vmi, &xa.main_event))
+	if (VMI_SUCCESS != vmi_register_event (gnif.vmi, &gnif.main_event))
 	{
 		nvmi_error ("Unable to register interrupt event");
 		goto exit;
@@ -1127,11 +1062,11 @@ nif_event_loop_worker (void * arg)
 {
 	int rc = 0;
 
-	*xa.ext_nif_busy = true;
+	*gnif.ext_nif_busy = true;
 
-	sem_wait (&xa.start_loop);
+	sem_wait (&gnif.start_loop);
 
-	if (xa.interrupted)
+	if (gnif.interrupted)
 	{
 		goto exit;
 	}
@@ -1145,15 +1080,15 @@ nif_event_loop_worker (void * arg)
 	}
 
 	nvmi_info ("Entering VMI event loop: resuming VM");
-	vmi_resume_vm (xa.vmi);
+	vmi_resume_vm (gnif.vmi);
 
-	while (!xa.interrupted)
+	while (!gnif.interrupted)
 	{
-		status_t status = vmi_events_listen (xa.vmi, 500);
+		status_t status = vmi_events_listen (gnif.vmi, 500);
 		if (status != VMI_SUCCESS)
 		{
 			nvmi_error ("Some issue in the event_listen loop. Aborting!");
-			xa.interrupted = true;
+			gnif.interrupted = true;
 			rc = EBUSY;
 		}
 	}
@@ -1164,32 +1099,32 @@ nif_event_loop_worker (void * arg)
 
 	nvmi_info ("Tearing down and flushing VMI events");
 
-	vmi_pause_vm (xa.vmi);
+	vmi_pause_vm (gnif.vmi);
 
 	// Flush out events (which require read lock) before locking down callbacks with write lock
-	(void) vmi_events_listen (xa.vmi, 0);
+	(void) vmi_events_listen (gnif.vmi, 0);
 
 	// No more first-level callbacks (interrupts, initial SMCs)
 	unregister_main_event();
 
 	// Intel: Flush out SS events, then disable them
-	vmi_resume_vm (xa.vmi);
-	vmi_pause_vm (xa.vmi);
-	(void) vmi_events_listen (xa.vmi, 0);
+	vmi_resume_vm (gnif.vmi);
+	vmi_pause_vm (gnif.vmi);
+	(void) vmi_events_listen (gnif.vmi, 0);
 	unregister_ss_events();
 
 	// Now there should be no pending events and the VM should be in a good state
 	nvmi_info ("Resuming VM");
-	vmi_resume_vm(xa.vmi);
+	vmi_resume_vm(gnif.vmi);
 
 	allow_callbacks (false);
 
 exit:
 	nvmi_info ("Exited VMI event loop");
 
-	xa.loop_status = rc;
-	*xa.ext_nif_busy = false;
-	sem_post (&xa.loop_complete);
+	gnif.loop_status = rc;
+	*gnif.ext_nif_busy = false;
+	sem_post (&gnif.loop_complete);
 
 	return NULL;
 }
@@ -1199,10 +1134,10 @@ void
 nif_fini(void)
 {
 	nvmi_info ("Waiting for Xen event loop to shut down...");
-	if (xa.event_loop_thread)
+	if (gnif.event_loop_thread)
 	{
-		g_thread_join (xa.event_loop_thread);
-		xa.event_loop_thread = NULL;
+		g_thread_join (gnif.event_loop_thread);
+		gnif.event_loop_thread = NULL;
 	}
 	nvmi_info ("Xen event loop has shut down...");
 
@@ -1210,31 +1145,31 @@ nif_fini(void)
 
 	fflush (stdout);
 
-	if (NULL != xa.shadow_pnode_mappings)
+	if (NULL != gnif.shadow_pnode_mappings)
 	{
-		g_hash_table_destroy (xa.shadow_pnode_mappings);
-		xa.shadow_pnode_mappings = NULL;
+		g_hash_table_destroy (gnif.shadow_pnode_mappings);
+		gnif.shadow_pnode_mappings = NULL;
 	}
-	if (NULL != xa.pframe_sframe_mappings)
+	if (NULL != gnif.pframe_sframe_mappings)
 	{
-		g_hash_table_destroy (xa.pframe_sframe_mappings);
-		xa.pframe_sframe_mappings = NULL;
+		g_hash_table_destroy (gnif.pframe_sframe_mappings);
+		gnif.pframe_sframe_mappings = NULL;
 	}
 
-	if (NULL != xa.gpa_hook_mappings)
+	if (NULL != gnif.gpa_hook_mappings)
 	{
-		g_hash_table_destroy (xa.gpa_hook_mappings);
-		xa.gpa_hook_mappings = NULL;
+		g_hash_table_destroy (gnif.gpa_hook_mappings);
+		gnif.gpa_hook_mappings = NULL;
 	}
 
 	destroy_views();
 
 	fini_xen_monitor();
 
-	vmi_destroy(xa.vmi);
+	vmi_destroy(gnif.vmi);
 
-	sem_destroy (&xa.start_loop);
-	sem_destroy (&xa.loop_complete);
+	sem_destroy (&gnif.start_loop);
+	sem_destroy (&gnif.loop_complete);
 }
 
 
@@ -1247,13 +1182,13 @@ nif_init(const char* name,
 	int rc = 0;
 
 	// Not in event loop yet...
-	xa.ext_nif_busy = nif_busy;
+	gnif.ext_nif_busy = nif_busy;
 
-	*xa.ext_nif_busy = true;
+	*gnif.ext_nif_busy = true;
 
 	// Initialize the libvmi library.
 	if (VMI_FAILURE ==
-	    vmi_init_complete(&xa.vmi, (void*)name, VMI_INIT_DOMAINNAME| VMI_INIT_EVENTS,
+	    vmi_init_complete(&gnif.vmi, (void*)name, VMI_INIT_DOMAINNAME| VMI_INIT_EVENTS,
 			      NULL, VMI_CONFIG_GLOBAL_FILE_ENTRY, NULL, NULL))
 	{
 		rc = EIO;
@@ -1267,31 +1202,28 @@ nif_init(const char* name,
 		goto exit;
 	}
 
-	xa.pframe_sframe_mappings = g_hash_table_new (NULL, NULL);
-	xa.shadow_pnode_mappings = g_hash_table_new_full (NULL, NULL, NULL, free_nif_page_node);
-	xa.gpa_hook_mappings  = g_hash_table_new (NULL, NULL);
+	gnif.pframe_sframe_mappings = g_hash_table_new (NULL, NULL);
+	gnif.shadow_pnode_mappings = g_hash_table_new_full (NULL, NULL, NULL, free_nif_page_node);
+	gnif.gpa_hook_mappings  = g_hash_table_new (NULL, NULL);
 
 	// Pause the VM here. It is resumed via nif_event_loop() and nif_fini()
-	vmi_pause_vm(xa.vmi);
+	vmi_pause_vm(gnif.vmi);
 
-	if (0 != xc_altp2m_set_domain_state(xa.xci, xa.domain_id, 1))
+	if (0 != xc_altp2m_set_domain_state(gnif.xci, gnif.domain_id, 1))
 	{
 		rc = EIO;
-		nvmi_error ("Failed to enable altp2m for domain_id: %u", xa.domain_id);
+		nvmi_error ("Failed to enable altp2m for domain_id: %u", gnif.domain_id);
 		goto exit;
 	}
 
-	if (0 != xc_altp2m_create_view (xa.xci, xa.domain_id, 0, &xa.trigger_view))
+	if (0 != xc_altp2m_create_view (gnif.xci, gnif.domain_id, 0, &gnif.trigger_view))
 	{
 		rc = EIO;
 		nvmi_error ("Failed to create trigger view");
 		goto exit;
 	}
 
-//	nvmi_warn ("Fixing trigger view to default view");
-//	xa.trigger_view = ALTP2M_DEFAULT_VIEW;
-
-	if (0 != xc_altp2m_create_view (xa.xci, xa.domain_id, 0, &xa.active_view))
+	if (0 != xc_altp2m_create_view (gnif.xci, gnif.domain_id, 0, &gnif.active_view))
 	{
 		rc = EIO;
 		nvmi_error ("Failed to create active view");
@@ -1299,7 +1231,7 @@ nif_init(const char* name,
 	}
 
 #if defined(ARM64)
-	if (0 != xc_altp2m_create_view (xa.xci, xa.domain_id, 0, &xa.ss_view))
+	if (0 != xc_altp2m_create_view (gnif.xci, gnif.domain_id, 0, &gnif.ss_view))
 	{
 		rc = EIO;
 		nvmi_error ("Failed to create SS view");
@@ -1307,17 +1239,17 @@ nif_init(const char* name,
 	}
 #endif
 	// Policy: start the monitoring off in trigger view
-	if (0 != xc_altp2m_switch_to_view (xa.xci, xa.domain_id, xa.trigger_view))
+	if (0 != xc_altp2m_switch_to_view (gnif.xci, gnif.domain_id, gnif.trigger_view))
 	{
 		rc = EIO;
-		nvmi_error ("Failed to switch to active view id:%u", xa.active_view);
+		nvmi_error ("Failed to switch to active view id:%u", gnif.active_view);
 		goto exit;
 	}
-	xa.requested_level = NVMI_MONITOR_LEVEL_TRIGGERS;
+	gnif.requested_level = NVMI_MONITOR_LEVEL_TRIGGERS;
 
 	nvmi_info ("Altp2m: active_view created and activated");
 
-	status = vmi_pid_to_dtb (xa.vmi, 0, &xa.kdtb);
+	status = vmi_pid_to_dtb (gnif.vmi, 0, &gnif.kdtb);
 	if (VMI_FAILURE == status)
 	{
 		rc = EIO;
@@ -1325,21 +1257,21 @@ nif_init(const char* name,
 		goto exit;
 	}
 
-	rc = sem_init (&xa.start_loop, 0, 0);
+	rc = sem_init (&gnif.start_loop, 0, 0);
 	if (rc)
 	{
 		nvmi_error ("sem_init() failed: %d", rc);
 		goto exit;
 	}
 
-	rc = sem_init (&xa.loop_complete, 0, 0);
+	rc = sem_init (&gnif.loop_complete, 0, 0);
 	if (rc)
 	{
 		nvmi_error ("sem_init() failed: %d", rc);
 		goto exit;
 	}
 
-	xa.event_loop_thread = g_thread_new ("vmi_event_looper", nif_event_loop_worker, NULL);
+	gnif.event_loop_thread = g_thread_new ("vmi_event_looper", nif_event_loop_worker, NULL);
 
 exit:
 	return rc;
@@ -1349,20 +1281,19 @@ exit:
 int
 nif_get_vmi (vmi_instance_t * vmi)
 {
-	*vmi = xa.vmi;
+	*vmi = gnif.vmi;
 	return 0;
 }
-
 
 
 void
 nif_stop (void)
 {
 	// Called via signal handler; don't block
-	xa.interrupted = true;
+	gnif.interrupted = true;
 
 	// Kick off event loop in case it hasn't started yet
-	sem_post (&xa.start_loop);
+	sem_post (&gnif.start_loop);
 
 	nvmi_warn ("Received request to shutdown VMI event loop");
 }
@@ -1374,10 +1305,9 @@ nif_event_loop (void)
 	int rc = 0;
 
 	// Release the thread to start looping
-	sem_post (&xa.start_loop);
+	sem_post (&gnif.start_loop);
 
 	// Wait for exit
-
-	sem_wait (&xa.loop_complete);
-	return xa.loop_status;
+	sem_wait (&gnif.loop_complete);
+	return gnif.loop_status;
 }
