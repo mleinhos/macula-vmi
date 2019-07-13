@@ -628,176 +628,6 @@ exit:
 
 /**
  *
- * Reads user memory. TODO: broken/limited on ARM.
- */
-static char *
-read_user_mem (vmi_instance_t vmi,
-	       nvmi_event_t * evt,
-	       addr_t va,
-	       size_t maxlen,
-	       enum syscall_arg_type type)
-{
-	int rc = 0;
-	status_t status = VMI_SUCCESS;
-	addr_t pa = 0;
-	bool read_more = true;
-	char * str = NULL;
-	addr_t dtb = 0;
-	char buf[16] = {0};
-	size_t sz = 0;
-	int retry = 0;
-
-#if defined(X86_64) || defined(EXPERIMENTAL_READ_USERMEM)
-	// Actually try to pull the contents out of user memory
-
-	// TODO: use a faster technique - ideally calling this while
-	// target process is in scope but not directly in event
-	// callback stack.
-	//
-	// TODO: write own impl of this function, using already-known
-	// dtb and writing contents directly into caller-supplied
-	// buffer.
-	str = vmi_read_str_va (vmi, va, evt->task->pid);
-	if (NULL == str)
-	{
-		// Maybe inject #PF too?
-#if defined(X86_64) || defined(EXPERIMENTAL_ARM_FEATURES)
-//		vmi_v2pcache_flush (vmi, evt->task->task_dtb);
-		vmi_v2pcache_flush (vmi, ~0);
-#else
-		vmi_v2pcache_flush (vmi, ~0);
-#endif
-		vmi_pidcache_flush (vmi);
-		vmi_rvacache_flush (vmi);
-		// Try #2
-		str = vmi_read_str_va (vmi, va, evt->task->pid);
-		if (NULL == str)
-		{
-			nvmi_error ("Could not read string at %" PRIx64 " in PID %d",
-				    va, evt->task->pid);
-			goto failsafe;
-		}
-	}
-
-	// Success, done
-	goto exit;
-
-#if 0 // below is a graveyard of various stuff that doesn't work on ARM
-
-		// FIXME: fix user mem deref on ARM
-	// TODO: clear out v2p cache prior to translation
-
-	// use vmi_get_kernel_struct_offset, to find task->mm->pgd
-	// ARM: vmi_pid_to_dtb broken
-	// ARM: vmi_read is misdirected. dtb wrong?
-	// recompile libvmi with VMI_DEBUG_PTLOOKUP enabled
-/*
-	status = vmi_pid_to_dtb (vmi, evt->task->pid, &dtb);
-	if (VMI_FAILURE == status) {
-		rc = EIO;
-		nvmi_info ("Error could get DTB for pid %ld", evt->task->pid);
-		goto exit;
-	}
-*/
-	dtb = evt->task->task_dtb;
-	nvmi_debug ("PID %ld --> DTB %lx", evt->task->pid, dtb);
-
-	vmi_v2pcache_flush (vmi, dtb);
-	//vmi_v2pcache_flush (vmi,  ~0ull);
-
-	access_context_t ctx = { .translate_mechanism = VMI_TM_PROCESS_DTB,
-				 .dtb = dtb,
-				 // .dtb = evt->r.arm.r.ttbr0,
-				 .addr = va };
-	// better to read directly into caller buffer
-
-/*
-//	str = vmi_read_str(vmi, &ctx);
-//	if (VMI_FAILURE == status) {
-	if (NULL == str) {
-		rc = EIO;
-		nvmi_info ("Error could get PA from VA %" PRIx64 ".", va);
-		goto exit;
-	}
-*/
-
-	status = vmi_read (vmi, &ctx, sizeof(buf), buf, &sz);
-	if (VMI_FAILURE == status)
-	{
-		rc = EIO;
-		nvmi_warn ("Error could read memory from VA %" PRIx64 ".", va);
-
-		snprintf (buf, sizeof(buf), "*0x%" PRIx64, va);
-		str = strdup (buf);
-		goto exit;
-	}
-
-	nvmi_debug ("Read string '%s' from memory", buf);
-//	str = strdup ("junk");
-	str = strdup (buf);
-	goto exit;
-/*
-#if defined(X86_64) // INTEL
-
-#  if 1 // x86: works
-	str = vmi_read_str_va (vmi, va, evt->task->pid);
-	if (NULL == str) {
-		nvmi_info ("Error: could not read string at %" PRIx64 " in PID %lx",
-			va, evt->task->pid);
-		goto exit;
-	}
-#  endif
-
-#  if 0 // x86: works
-	status = vmi_pid_to_dtb (vmi, evt->task->pid, &dtb);
-	if (VMI_FAILURE == status) {
-		rc = EIO;
-		nvmi_info ("Error could get DTB for pid %ld", evt->task->pid);
-		goto exit;
-	}
-
-	access_context_t ctx = { .translate_mechanism = VMI_TM_PROCESS_DTB,
-				 .dtb = dtb,
-				 .addr = va };
-	// better to read directly into caller buffer
-
-	str = vmi_read_str(vmi, &ctx);
-//	if (VMI_FAILURE == status) {
-	if (NULL == str) {
-		rc = EIO;
-		nvmi_info ("Error could get PA from VA %" PRIx64 ".", va);
-		goto exit;
-	}
-//	status = vmi_pagetable_lookup (vmi, evt->r.ttrb1, va, &pa);
-//	status = vmi_read_va (vmi, va, evt->r.ttbr1)
-#  endif
-
-//	nvmi_info ("Successfully read string '%s' from mem (%lx pid %lx)",
-//		 str, va, evt->task->pid);
-
-#else // ARM
-#endif
-*/
-#endif // 0
-
-#else
-#endif
-
-
-failsafe:
-	// An attempt to relay something to the caller
-
-	//snprintf (buf, sizeof(buf), "*0x%" PRIx64, va);
-	//str = strdup (buf);
-	str = strdup ("[unknown]");
-
-exit:
-	return str;
-}
-
-
-/**
- *
  * Reads the requested amount of memory, up to the end of the starting
  * page, directly into the caller-provided buffer.
  *
@@ -1045,7 +875,7 @@ exit:
  * TODO: Shift as much of this work as possible to a worker thread.
  */
 static void
-cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
+cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t * event, void * arg)
 {
 	int rc = 0;
 	status_t status = VMI_SUCCESS;
@@ -1081,7 +911,9 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 		case NVMI_ARG_TYPE_FDSET:
 			break;
 		case NVMI_ARG_TYPE_STR:
+#if defined(EXPERIMENTAL_ARM_FEATURES) || defined(X86_64)
 			rc = cb_read_str (vmi, evt->task, val, &evt->mem[dataofs], &rem);
+#endif
 			if (rc)
 			{
 				// emit a zero-length string in evt struct
