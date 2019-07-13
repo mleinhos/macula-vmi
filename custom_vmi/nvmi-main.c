@@ -493,7 +493,11 @@ cb_build_task_context (vmi_instance_t vmi,
 	strncpy ((*tinfo)->comm, pname, sizeof((*tinfo)->comm));
 	free (pname);
 
-	// Get current->mm->pgd. LibVMI knows best.
+#if defined(EXPERIMENTAL_ARM_FEATURES) || defined(X86_64)
+	// Get current->mm->pgd. LibVMI knows best. Sometimes this
+	// puts LibVMI into an infinite loop, but grabbing
+	// *(task->mm->pgd) on our own doesn't appear any better.
+
 	status = vmi_pid_to_dtb (vmi, (*tinfo)->pid, &(*tinfo)->task_dtb);
 	if (VMI_FAILURE == status)
 	{
@@ -508,6 +512,7 @@ cb_build_task_context (vmi_instance_t vmi,
 
 	nvmi_debug ("Build context: task=%lx (key) pid=%d comm=%s",
 		    curr_task, (*tinfo)->pid, (*tinfo)->comm);
+#endif
 
 exit:
 	return rc;
@@ -555,7 +560,7 @@ cb_gather_context (vmi_instance_t vmi,
 	g_rw_lock_reader_unlock (&gstate.context_lock);
 
 	if (NULL == task ||
-	    ((0 == task->pid || 0 == task->task_dtb) && task->events_since_trigger < 5))
+	    ((0 == task->pid) && task->events_since_trigger < 5))
 	{
 		// Build new context
 		rc = cb_build_task_context (vmi, &evt->r, curr, &task);
