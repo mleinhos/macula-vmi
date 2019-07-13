@@ -117,7 +117,6 @@ typedef struct _nvmi_state {
 	addr_t mm_pgd_ofs;
 
 	// Rekall profile info
-	const char * symbol_source_file;
 	struct json_object * rekall_root;
 
 	addr_t va_current_task;
@@ -1215,6 +1214,7 @@ exit:
 }
 
 
+// TODO: handle KASLR
 static int
 set_instr_points_rekall (void)
 {
@@ -1251,7 +1251,7 @@ set_instr_points_rekall (void)
 		{
 			kva |= 0xffff000000000000;
 		}
-//		printf ("%s: %p\n", symname, va);
+
 		rc = set_instr_point (symname, kva);
 		if (rc != 0 && rc != ENOENT)
 		{
@@ -1267,82 +1267,6 @@ set_instr_points_rekall (void)
 
 exit:
 	return rc;
-}
-
-
-static int
-set_instr_points_mapfile (void)
-{
-	FILE* input_file = NULL;
-	char one_line[1024];
-	char * nl = NULL;
-	int rc = 0;
-
-	assert (NULL == gstate.rekall_root);
-
-	input_file = fopen(gstate.symbol_source_file, "r+");
-	if (NULL == input_file)
-	{
-		rc = EINVAL;
-		nvmi_warn ("Can't open system map file '%s'", gstate.symbol_source_file);
-		goto exit;
-	}
-
-	while (fgets( one_line, sizeof(one_line), input_file) != NULL)
-	{
-		char * symname = NULL;
-		addr_t kva = 0;
-
-		// sample line: "ffffffff81033570 T sys_mmap"
-		symname = strstr(one_line, " T ");
-		if (NULL == symname) { // find the global text section symbols
-			continue;
-		}
-		*symname = '\0';
-		symname += 3;
-
-		// overwrite EOL with NULL char
-		if (NULL != (nl = strchr(symname, '\n')))
-		{
-			*nl='\0';
-		}
-
-		// line: "ffffffff81033570\0T sys_mmap\0"
-		kva = (addr_t) strtoul(one_line, NULL, 16);
-
-		// success if this is not an instrumented point
-		rc = set_instr_point (symname, kva);
-		if (rc != 0 && rc != ENOENT)
-		{
-			goto exit;
-		}
-	} // while
-
-	nvmi_info ("Found %d syscalls to monitor", gstate.act_calls);
-	rc = 0;
-
-exit:
-	if (NULL != input_file)
-	{
-		fclose(input_file);
-	}
-
-	return rc;
-}	
-
-
-// TODO: handle KASLR
-static int
-set_instrumentation_points (void)
-{
-	if (NULL == gstate.rekall_root)
-	{
-		return set_instr_points_mapfile();
-	}
-	else
-	{
-		return set_instr_points_rekall();
-	}
 }
 
 
@@ -1722,7 +1646,7 @@ nvmi_main_fini (void)
 		json_object_put (gstate.rekall_root);
 		gstate.rekall_root = NULL;
 	}
-	
+
 	nvmi_info ("main cleanup complete");
 }
 
@@ -1732,6 +1656,13 @@ nvmi_main_init (void)
 	int rc = 0;
 	status_t status = VMI_SUCCESS;
 	vmi_instance_t vmi;
+	const char * rekall_path = NULL;
+
+	rc = nif_get_vmi (&vmi);
+	if (rc)
+	{
+		goto exit;
+	}
 
 	// Handle ctrl+c properly
 	gstate.act.sa_handler = close_handler;
@@ -1742,19 +1673,19 @@ nvmi_main_init (void)
 	sigaction(SIGINT,  &gstate.act, NULL);
 	sigaction(SIGALRM, &gstate.act, NULL);
 
-	gstate.rekall_root = json_object_from_file (gstate.symbol_source_file);
+	rekall_path = vmi_get_rekall_path (vmi);
+	if (NULL == rekall_path)
+	{
+		rc = ENOENT;
+		fprintf (stderr, "Failed to find rekall file. Was it included in the LibVMI profile?\n");
+		goto exit;
+	}
+
+	gstate.rekall_root = json_object_from_file (rekall_path);
 	if (NULL == gstate.rekall_root)
 	{
 		fprintf (stderr, "File %s is not a REKALL profile. Treating it as a Symbol map.\n",
-			 gstate.symbol_source_file);
-		nvmi_warn ("Treating file '%s' as Symbol map - it doesn't parse as a REKALL profile.",
-			 gstate.symbol_source_file);
-	}
-
-	rc = nif_get_vmi (&vmi);
-	if (rc)
-	{
-		goto exit;
+			 rekall_path);
 	}
 
 	g_rw_lock_init (&gstate.context_lock);
@@ -2023,20 +1954,21 @@ main (int argc, char* argv[])
 		}
 	}
 
-	if (help || argc - optind != 2)
+	if (help || argc - optind != 1)
 	{
 		printf("*** Numen Introspection Framework v2.0 ***\n\n");
 		printf("Usage:\n");
-		printf("%s [-v] [-o logfile] <domain name> <path to system_map>\n", argv[0]);
+		printf("%s [-v] [-o logfile] <domain name>\n", argv[0]);
 		printf("\t-v Increases verbosity of output logging, can be specified several times.\n");
 		printf("\t-o Specifies file where output logging goes. Default is stderr.\n");
 		printf("\t-s Run in silent mode - do not output events to brain.\n");
 		printf("\t-d Periodically dump callback statistics to logging target.\n");
+		printf("Notes:\n");
+		printf("\tRekall profile must be registered in LibVMI profile.\n");
 		return 1;
 	}
 
 	domu = argv [optind];
-	gstate.symbol_source_file = argv [optind + 1];
 
 	if (logger_init(log_file, verbosity))
 	{
@@ -2062,8 +1994,7 @@ main (int argc, char* argv[])
 		goto exit;
 	}
 
-	rc = set_instrumentation_points ();
-	//rc = 4;
+	rc = set_instr_points_rekall();
 	if (rc)
 	{
 		goto exit;
