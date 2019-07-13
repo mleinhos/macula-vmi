@@ -415,26 +415,8 @@ cb_current_task (vmi_instance_t vmi,
 	// SP_EL0 has the same value across different contexts!
 	*task = regs->arm.sp_el0;
 
-#if 0
-	// Get current->pid
-	status = vmi_read_32_va(vmi,
-				curr_task + gstate.task_pid_ofs,
-				0,
-				&(*tinfo)->pid);
-	if (VMI_FAILURE == status)
-	{
-		rc = EFAULT;
-		nvmi_warn ("Failed to read task's pid at %" PRIx64 " + %lx",
-			 (*tinfo)->task_struct, gstate.task_pid_ofs);
-		goto exit;
-	}
-#endif
-
-
 #else
-	// x86: slow
-	// key = regs->arch.intel.sp & NVMI_KSTACK_MASK;
-	// ^^^ too uncertain for a process identification ...
+	// x86 - slow: get current; alternate: get base of task kernel struct
 	status_t status = vmi_read_addr_va(vmi,
 					   regs->x86.r.gs_base + gstate.va_current_task,
 					   0,
@@ -482,7 +464,6 @@ cb_build_task_context (vmi_instance_t vmi,
 #endif
 	(*tinfo)->task_struct = curr_task;
 
-#if 1
 	// Get current->pid
 	status = vmi_read_32_va(vmi,
 				curr_task + gstate.task_pid_ofs,
@@ -495,12 +476,8 @@ cb_build_task_context (vmi_instance_t vmi,
 			 (*tinfo)->task_struct, gstate.task_pid_ofs);
 		goto exit;
 	}
-#endif
-
-//	(*tinfo)->pid = pid;
 
 	// Get current->comm
-	// TODO: This is wrong
 	pname = vmi_read_str_va (vmi, curr_task + gstate.task_name_ofs, 0);
 	if (NULL == pname)
 	{
@@ -510,66 +487,13 @@ cb_build_task_context (vmi_instance_t vmi,
 		goto exit;
 	}
 
-//	nvmi_info ("pid %d --> task %p, comm %s", pid, curr_task, pname);
 	nvmi_info ("pid %d --> task %p, comm %s",
 		   (*tinfo)->pid, curr_task, pname);
 
 	strncpy ((*tinfo)->comm, pname, sizeof((*tinfo)->comm));
 	free (pname);
 
-	// Get the process' tdb one way or another. We can't yet do this on ARM.
-#if 0
-	// Yes, these things are either wrong or cause an infinite loop on ARM
-
-	// Read current->mm
-	status = vmi_read_addr_va (vmi, curr_task + gstate.task_mm_ofs, 0, &task_mm);
-	if (VMI_FAILURE == status)
-	{
-		rc = EIO;
-		nvmi_warn ("Failed to read current->mm");
-		goto exit;
-	}
-
-	// Read current->mm->pgd: Yields wrong result on ARM
-	status = vmi_read_addr_va (vmi, task_mm + gstate.mm_pgd_ofs, 0, &(*tinfo)->task_dtb);
-	if (VMI_FAILURE == status)
-	{
-		rc = EIO;
-		nvmi_warn ("Failed to read mm->pgd");
-		goto exit;
-	}
-
-	nvmi_debug ("(task->mm->pgd: PID %d --> dtb %lx",
-		 (uint32_t) (*tinfo)->pid,
-		 (*tinfo)->task_dtb);
-#endif
-
-#if defined(X86_64) || defined(EXPERIMENTAL_ARM_FEATURES)
-	// Yes, these things are either wrong or cause an infinite
-	// loop on ARM. On Intel the task_struct sometimes can't be
-	// found for the call below.
-	/*
-	// Read current->mm
-	status = vmi_read_addr_va (vmi, curr_task + gstate.task_mm_ofs, 0, &task_mm);
-	if (VMI_FAILURE == status) {
-		rc = EIO;
-		nvmi_warn ("Failed to read current->mm");
-		goto exit;
-	}
-
-	// Read current->mm->pgd: Yields wrong result on ARM
-	status = vmi_read_addr_va (vmi, task_mm + gstate.mm_pgd_ofs, 0, &(*tinfo)->task_dtb);
-	if (VMI_FAILURE == status) {
-		rc = EIO;
-		nvmi_warn ("Failed to read mm->pgd");
-		goto exit;
-	}
-
-	nvmi_debug ("(task->mm->pgd: PID %d --> dtb %lx",
-		 (uint32_t) (*tinfo)->pid,
-		 (*tinfo)->task_dtb);
-	*/
-
+	// Get current->mm->pgd. LibVMI knows best.
 	status = vmi_pid_to_dtb (vmi, (*tinfo)->pid, &(*tinfo)->task_dtb);
 	if (VMI_FAILURE == status)
 	{
@@ -582,7 +506,6 @@ cb_build_task_context (vmi_instance_t vmi,
 		    (uint32_t) (*tinfo)->pid,
 		    (*tinfo)->task_dtb);
 
-#endif
 	nvmi_debug ("Build context: task=%lx (key) pid=%d comm=%s",
 		    curr_task, (*tinfo)->pid, (*tinfo)->comm);
 
@@ -625,14 +548,14 @@ cb_gather_context (vmi_instance_t vmi,
 	}
 
 	// Look for key in known contexts. If it isn't there, allocate
-	// new nvmi_task_info_t and populate it.
-	// TODO: enable caching by figuring out why it's broken on ARM (current != our key)
-
+	// new nvmi_task_info_t and populate it. Try a couple times if
+	// we failed to get the full context.
 	g_rw_lock_reader_lock (&gstate.context_lock);
 	task = g_hash_table_lookup (gstate.context_lookup, (gpointer)curr);
 	g_rw_lock_reader_unlock (&gstate.context_lock);
 
-	if (NULL == task)
+	if (NULL == task ||
+	    ((0 == task->pid || 0 == task->task_dtb) && task->events_since_trigger < 5))
 	{
 		// Build new context
 		rc = cb_build_task_context (vmi, &evt->r, curr, &task);
@@ -875,16 +798,18 @@ exit:
 
 /**
  *
- * Reads the requested amount of memory, up to the end of the starting page.
+ * Reads the requested amount of memory, up to the end of the starting
+ * page, directly into the caller-provided buffer.
+ *
+ * task - the task that owns the VA, or NULL if kernel memory
  */
 static int
-read_user_mem2 (IN vmi_instance_t vmi,
-		IN nvmi_task_info_t * task,
-		IN addr_t va,
-		OUT uint8_t * buf,
-		INOUT size_t * len)
+read_mem_one_page (IN vmi_instance_t vmi,
+			IN nvmi_task_info_t * task,
+			IN addr_t va,
+			OUT uint8_t * buf,
+			INOUT size_t * len)
 {
-#if defined(X86_64) || defined(EXPERIMENTAL_READ_USERMEM)
 	int rc = 0;
 	status_t status = VMI_SUCCESS;
 	int remaining = *len;
@@ -894,14 +819,13 @@ read_user_mem2 (IN vmi_instance_t vmi,
 	int read_size = MIN (VMI_PS_4KB - ofs, *len);
 
 	access_context_t ctx = { .translate_mechanism = VMI_TM_PROCESS_DTB,
-				 .dtb = task->task_dtb,
+				 .dtb = (task ? task->task_dtb : 0),
 				 .addr = va };
-
 	if (0 == ctx.dtb)
 	{
 		rc = EINVAL;
-		nvmi_warn ("Failing request to read memory from proc %d, invalid DTB %" PRIx64 ".",
-			   task->pid, task->task_dtb);
+		nvmi_warn ("Failing request to read memory from proc %d, invalid DTB 0.",
+			   task->pid);
 		goto exit;
 	}
 
@@ -916,9 +840,6 @@ read_user_mem2 (IN vmi_instance_t vmi,
 
 exit:
 	return rc;
-#else
-	return ENOSYS;
-#endif	
 }
 
 
@@ -1050,13 +971,13 @@ cb_update_trigger_state (nvmi_cb_info_t * cbi,
 
 /**
  *
- * Read string from user memory until: (1) NULL terminator is found,
+ * Read string from memory until: (1) NULL terminator is found,
  * or (2) *len bytes have been exhausted. Works in conjunction with
- * read_user_mem2() to avoid heap allocations and reading across page
+ * read_mem_one_page() to avoid heap allocations and reading across page
  * boundaries if possible.
  */
 static inline int
-cb_read_user_str (IN vmi_instance_t vmi,
+cb_read_str (IN vmi_instance_t vmi,
 		  IN nvmi_task_info_t * task,
 		  IN addr_t va,
 		  OUT uint8_t * buf,
@@ -1083,7 +1004,7 @@ cb_read_user_str (IN vmi_instance_t vmi,
 			break;
 		}
 
-		rc = read_user_mem2 (vmi, task, va + ofs, &buf[ofs], &bytes_read);
+		rc = read_mem_one_page (vmi, task, va + ofs, &buf[ofs], &bytes_read);
 		if (rc)
 		{
 			break;
@@ -1160,9 +1081,10 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t* event, void* arg)
 		case NVMI_ARG_TYPE_FDSET:
 			break;
 		case NVMI_ARG_TYPE_STR:
-			rc = cb_read_user_str (vmi, evt->task, val, &evt->mem[dataofs], &rem);
+			rc = cb_read_str (vmi, evt->task, val, &evt->mem[dataofs], &rem);
 			if (rc)
 			{
+				// emit a zero-length string in evt struct
 				continue;
 			}
 
