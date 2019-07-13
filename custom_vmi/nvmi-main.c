@@ -1931,7 +1931,7 @@ main (int argc, char* argv[])
 
 	gstate.use_comms = true;
 
-	while ((opt = getopt(argc, argv, ":o:svd")) != -1)
+	while ((opt = getopt(argc, argv, ":o:svdh")) != -1)
 	{
 		switch (opt)
 		{
@@ -1947,6 +1947,9 @@ main (int argc, char* argv[])
 		case 'd':
 			gstate.dump_stats = true;
 			break;
+		case 'h':
+			help = true;
+			break;
 		case '?':
 			fprintf (stderr, "Illegal option: %c\n", optopt);
 			help = true;
@@ -1958,11 +1961,12 @@ main (int argc, char* argv[])
 	{
 		printf("*** Numen Introspection Framework v2.0 ***\n\n");
 		printf("Usage:\n");
-		printf("%s [-v] [-o logfile] <domain name>\n", argv[0]);
+		printf("%s [-v] [-o logfile] [-s] [-d] [-h] <domain name>\n", argv[0]);
 		printf("\t-v Increases verbosity of output logging, can be specified several times.\n");
 		printf("\t-o Specifies file where output logging goes. Default is stderr.\n");
 		printf("\t-s Run in silent mode - do not output events to brain.\n");
 		printf("\t-d Periodically dump callback statistics to logging target.\n");
+		printf("\t-h Print this message and quit.\n");
 		printf("Notes:\n");
 		printf("\tRekall profile must be registered in LibVMI profile.\n");
 		return 1;
