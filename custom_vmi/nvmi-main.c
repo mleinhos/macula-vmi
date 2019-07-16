@@ -900,6 +900,7 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t * event, void * arg)
 	}
 
 	atomic_inc (&cbi->hitct);
+	// TODO: move to event consumer: the event itself isn't needed or populated!
 	cb_update_trigger_state (cbi, evt->task);
 
 	// Only syscall events have arguments to parse
@@ -1513,7 +1514,7 @@ consume_syscall_event (nvmi_event_t * evt)
 
 #if defined(ARM64)
 	snprintf (buf2, sizeof(buf2), ")	proc=%s	pid=%d	 TTBR0=%" PRIx32 "	TTBR1=%" PRIx32 "",
-		  evt->task->comm, evt->task->pid, evt->r.arm.r.ttbr0, evt->r.arm.r.ttbr1);
+		  evt->task->comm, evt->task->pid, evt->task->task_dtb, evt->r.arm.r.ttbr1);
 #else
 	snprintf (buf2, sizeof(buf2), ")	proc=%s		pid=%d		CR3=%" PRIx64 "",
 		  evt->task->comm, evt->task->pid, evt->r.x86.r.cr3);

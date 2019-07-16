@@ -9,8 +9,6 @@
 #ifndef NVMI_EVENT_TEMPLATES_H
 #define NVMI_EVENT_TEMPLATES_H
 
-//#define NVMI_MAX_SYSCALL_NAME_LEN 32
-
 #include <stdint.h>
 #include <stdbool.h>
 #include "nvmi-common.h"
@@ -18,7 +16,7 @@
 
 typedef enum _nvmi_callback_type
 {
-	NVMI_CALLBACK_NONE = 0,
+	NVMI_CALLBACK_UNSET = 0,
 	NVMI_CALLBACK_SYSCALL,
 	NVMI_CALLBACK_SPECIAL,
 } nvmi_callback_type_t;
@@ -30,7 +28,7 @@ typedef enum _nvmi_callback_type
  */
 typedef enum _nvmi_arg_type
 {
-	NVMI_ARG_TYPE_NONE = 0,
+	NVMI_ARG_TYPE_UNSET = 0,
 	NVMI_ARG_TYPE_SCALAR, // any long value that is not dereferenced, but NOT pointers
 	NVMI_ARG_TYPE_PVOID,  // a pointer that we will NOT dereference
 
@@ -68,16 +66,16 @@ typedef struct _nvmi_cb_info
 	// (Immutable) attributes and (mutable) state of the callback, intermingled here
 	struct
 	{
-		// immutable attributes
-		unsigned long derefs    : 1; // dereferences guest memory
-		unsigned long sticky    : 1; // cannot be disabled
-		unsigned long reset_ctx : 1; // triggers reset in process context, e.g. sys_exec* family
-		unsigned long inv_cache : 1; // invalidates VMI cache pertaining to process
-		unsigned long trigger   : 1; // include this instr point in the trigger view too
-		unsigned long trigger_off: 1; // this point deactives the given process' trigger
+		// immutable attributes 
+		bool      derefs; // dereferences guest memory
+		bool      sticky; // cannot be disabled
+		bool   reset_ctx; // triggers reset in process context, e.g. sys_exec* family
+		bool   inv_cache; // invalidates VMI cache pertaining to process
+		bool     trigger; // include this instr point in the trigger view too
+		bool trigger_off; // this point deactives the given process' trigger
 
 		// mutable state
-		unsigned long enabled   : 1; // is currently enabled
+		bool     enabled; // is currently enabled
 	} state;
 
 	// Syscall-specific stuff
@@ -147,6 +145,24 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 	  .state = { .derefs = 1, .enabled = 1, .trigger = 1},
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_SA     } ,
+		    { .type = NVMI_ARG_TYPE_SCALAR } } },
+
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_dup", .argct = 1,
+	  .state = { .enabled = 1},
+	  .args = { { .type = NVMI_ARG_TYPE_SCALAR } } },
+
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_dup2", .argct = 2,
+	  .state = { .enabled = 1},
+	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
+		    { .type = NVMI_ARG_TYPE_SCALAR } } },
+
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_dup3", .argct = 3,
+	  .state = { .enabled = 1},
+	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
+		    { .type = NVMI_ARG_TYPE_SCALAR },
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
@@ -302,6 +318,12 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 	  .state = { .enabled = 1},
 	  .args = { { .type = NVMI_ARG_TYPE_PVOID },
 		    { .type = NVMI_ARG_TYPE_SCALAR } } },
+
+	{ .cb_type = NVMI_CALLBACK_SYSCALL,
+	  .name = "sys_newstat", .argct = 2,
+	  .state = {  .derefs = 1, .enabled = 1},
+	  .args = { { .type = NVMI_ARG_TYPE_STR },
+		    { .type = NVMI_ARG_TYPE_PVOID } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,
 	  .name = "sys_open", .argct = 3,
@@ -509,7 +531,5 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 		    { .type = NVMI_ARG_TYPE_SCALAR} } },
 
 };
-
-
 
 #endif // NVMI_EVENT_TEMPLATES_H
