@@ -75,6 +75,12 @@
 #   define DUMP_STATS_INTERVAL 100000
 #endif //  DUMP_STATS_INTERVAL
 
+			// Used to hold IPv4 or IPv6 addr
+			typedef union
+			{
+				struct sockaddr_in  s4;
+				struct sockaddr_in6 s6;
+			} generic_addr_t;
 
 //
 // Special instrumentation points
@@ -85,7 +91,7 @@ nvmi_special_cbs[] =
 #define NVMI_DO_EXIT_IDX 0
 	// Included in trigger view, and also removes task from trigger consideration
 	{ .cb_type = NVMI_CALLBACK_SPECIAL, .name = "do_exit",
-	  .state = {.inv_cache = 1, .trigger = 1, .trigger_off = 1} },
+	  .state = {.inv_cache = 1, .trigger = 1, .trigger_off = 1, .reset_ctx = 1} },
 #define NVMI_FD_INSTALL_IDX 1
 	{ .cb_type = NVMI_CALLBACK_SPECIAL, .name = "fd_install", .argct = 6 },
 #define NVMI_DO_FORK_IDX 2
@@ -497,7 +503,7 @@ cb_build_task_context (vmi_instance_t vmi,
 	// puts LibVMI into an infinite loop, but grabbing
 	// *(task->mm->pgd) on our own doesn't appear any better.
 
-	status = vmi_pid_to_dtb (vmi, (*tinfo)->pid, &(*tinfo)->task_dtb);
+	status = vmi_pid_to_dtb (vmi, (*tinfo)->pid, &(*tinfo)->dtb);
 	if (VMI_FAILURE == status)
 	{
 		rc = EIO;
@@ -507,7 +513,7 @@ cb_build_task_context (vmi_instance_t vmi,
 	}
 	nvmi_debug ("vmi_pid_to_dtb: PID %d --> dtb %lx",
 		    (uint32_t) (*tinfo)->pid,
-		    (*tinfo)->task_dtb);
+		    (*tinfo)->dtb);
 
 	nvmi_debug ("Build context: task=%lx (key) pid=%d comm=%s",
 		    curr_task, (*tinfo)->pid, (*tinfo)->comm);
@@ -653,7 +659,7 @@ read_mem_one_page (IN vmi_instance_t vmi,
 	int read_size = MIN (VMI_PS_4KB - ofs, *len);
 
 	access_context_t ctx = { .translate_mechanism = VMI_TM_PROCESS_DTB,
-				 .dtb = (task ? task->task_dtb : 0),
+				 .dtb = (task ? task->dtb : 0),
 				 .addr = va };
 	if (0 == ctx.dtb)
 	{
@@ -668,7 +674,7 @@ read_mem_one_page (IN vmi_instance_t vmi,
 	{
 		rc = EIO;
 		nvmi_warn ("Error could read memory from proc %d, DTB %" PRIx64 ", VA %" PRIx64 ".",
-			   task->pid, task->task_dtb, va);
+			   task->pid, task->dtb, va);
 		goto exit;
 	}
 
@@ -932,33 +938,28 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t * event, void * arg)
 			break;
 		case NVMI_ARG_TYPE_SA:
 		{
-#if 0
-			struct addrinfo_in6 ai;
-			struct addrinfo *res;
+			// Read raw sockaddr into event buffer. Process later upon consumption.
+			nvmi_generic_addr_t * dst = (nvmi_generic_addr_t *) &evt->mem[dataofs];
 
-			status = vmi_read_va (vmi,
-					      val,
-					      evt->task->pid,
-					      sizeof(ai),
-					      &ai,
-					      NULL);
+			// At this stage, just grab the sockaddr from the guest in binary form.
+			access_context_t ctx = { .translate_mechanism = VMI_TM_PROCESS_DTB,
+						 .dtb = evt->task->dtb,
+						 .addr = val };
+
+			status = vmi_read (vmi, &ctx, sizeof(struct sockaddr_in6), dst, &len);
 			if (VMI_FAILURE == status)
 			{
-				nvmi_warn ("Failed to read addrinfo struct");
+				nvmi_warn ("Failed to read sockaddr struct from pid=%d dtb=%lx va=%lx",
+					   evt->task->pid, evt->task->dtb, val);
 				continue;
 			}
 
-			rc = getaddrinfo (NULL, NULL, (const struct addrinfo *) &ai, &res);
-			if (rc)
-			{
-				nvmi_warn ("Failed to decode addrinfo struct");
-				continue;
-			}
-
-			printf ("\targ %d: %s", i, res->ai_cannonname);
-			freeaddrinfo (res);
+			// Success
+			evt->mem_ofs[i] = dataofs;
+			evt->arg_lens[i] = offsetof(sock_addr_t, addr) + len;
+			dataofs += evt->arg_lens[i];
+			rem = sizeof(evt->mem) - dataofs;
 			break;
-#endif
 		}
 		default:
 			break;
@@ -1241,25 +1242,21 @@ set_instr_points_rekall (void)
 		char * symname = (char *) json_object_iter_peek_name(&it);
 		unsigned long kva = json_object_get_int64(json_object_iter_peek_value(&it));
 
-		if (NULL == strstr (symname, "sys"))
-		{
-			json_object_iter_next (&it);
-			continue;
-		}
-
-		// make the addr canonical
+		// Make the addr canonical.
 		if ( VMI_GET_BIT(kva, 47) )
 		{
 			kva |= 0xffff000000000000;
 		}
 
+		// Process every symbol: the instrumentation point
+		// setters get to decide whether it should be hooked.
 		rc = set_instr_point (symname, kva);
 		if (rc != 0 && rc != ENOENT)
 		{
 			nvmi_warn ("Failed on symbol %s", symname);
 			goto exit;
 		}
-		
+
 		json_object_iter_next (&it);
 	}
 
@@ -1336,9 +1333,6 @@ consume_special_event (nvmi_event_t * evt)
 				rc = errno;
 				nvmi_warn ("zmq_send() failed: %d", rc);
 			}
-			//		if (evt->task->pid == gstate.killpid) {
-			//			nvmi_info ("Kill of process pid=%d succeeded", evt->task->pid);
-			//			gstate.killpid = KILL_PID_NONE;
 		}
 
 		// we'll never see that task again....
@@ -1389,8 +1383,10 @@ consume_syscall_event (nvmi_event_t * evt)
 	char buf[1024] = {0};
 	char buf2[512];
 	event_t event = {0};
-	int dataofs = 0;
+	int input_ofs = 0;
+	int output_ofs = 0;
 	size_t size = offsetof(event_t, u.syscall.data);
+	size_t len = 0;
 
 	assert (cbi);
 	assert (cbi->cb_type == NVMI_CALLBACK_SYSCALL);
@@ -1414,82 +1410,87 @@ consume_syscall_event (nvmi_event_t * evt)
 
 		switch (cbi->args[i].type)
 		{
-		case NVMI_ARG_TYPE_STR: { // char *
+		case NVMI_ARG_TYPE_STR: // char *
+		{
 			uint8_t * bytes = &(evt->mem[ evt->mem_ofs[i] ]);
-			size_t len = MIN (evt->arg_lens[i], sizeof(event.u.syscall.data) - dataofs);
+			len = MIN (evt->arg_lens[i], sizeof(event.u.syscall.data) - output_ofs);
 			assert (len >= 0);
 
 			event.u.syscall.args[i].type = htobe32 (SYSCALL_ARG_TYPE_STR);
 			event.u.syscall.args[i].len  = htobe32 (len);
-			event.u.syscall.args[i].val.offset = htobe64 (dataofs);
+			event.u.syscall.args[i].val.offset = htobe64 (output_ofs);
 
 			if (len > 0)
 			{
 				event.u.syscall.flags |= SYSCALL_EVENT_FLAG_HAS_BUFFER;
 
-				memcpy (&event.u.syscall.data[dataofs], bytes, len);
+				memcpy (&event.u.syscall.data[output_ofs], bytes, len);
 
-				snprintf (buf2, sizeof(buf2) - 1, " \"%s\",", (const char *)&event.u.syscall.data[dataofs]);
+				snprintf (buf2, sizeof(buf2) - 1, " \"%s\",", (const char *)&event.u.syscall.data[output_ofs]);
 				strncat (buf, buf2, sizeof(buf) - strlen(buf) - 1);
 
-				if (dataofs + len >= sizeof(event.u.syscall.data))
+				if (output_ofs + len >= sizeof(event.u.syscall.data))
 				{
 					event.u.syscall.flags |= SYSCALL_EVENT_FLAG_BUFFER_TRUNCATED;
 					break;
 				}
-				dataofs += len;
+				input_ofs += len;
+				output_ofs += len;
 			}
 			break;
 		}
-
-#if 0
 		case NVMI_ARG_TYPE_SA:
 		{
+			nvmi_generic_addr_t * src = (nvmi_generic_addr_t *) &evt->mem[ evt->mem_ofs[i] ];
+			sock_addr_t * dst = (sock_addr_t *) &event.u.syscall.data [output_ofs];
+			const char * sastr = NULL;
 
-			struct addrinfo_in6 ai;
-			struct addrinfo *res;
-
-			status = vmi_read_va (vmi,
-					      val,
-					      evt->task->pid,
-					      sizeof(ai),
-					      &ai,
-					      NULL);
-			if (VMI_FAILURE == status )
+			switch (src->s4.sin_family)
 			{
-				nvmi_warn ("Failed to read addrinfo struct");
-				continue;
+			case AF_UNIX:
+				dst->family = htobe16 (SOCK_TYPE_UNIX);
+				dst->port   = 0;
+				sastr = strncpy ((char *) &dst->addr, src->su.sun_path, SYSCALL_MAX_ARG_BUF - output_ofs);
+				break;				
+			case AF_INET:
+				dst->family = htobe16 (SOCK_TYPE_IP4);
+				dst->port    = htobe16 (src->s4.sin_port);
+				sastr = inet_ntop (AF_INET, &(src->s4.sin_addr),
+						   (char *) &dst->addr, SYSCALL_MAX_ARG_BUF - output_ofs);
+				break;
+			case AF_INET6:
+				dst->family = htobe16 (SOCK_TYPE_IP6);
+				dst->port    = htobe16 (src->s6.sin6_port);
+				sastr = inet_ntop (AF_INET6, &(src->s6.sin6_addr),
+						   (char *) &dst->addr, SYSCALL_MAX_ARG_BUF - output_ofs);
+				break;
+			default:
+				break;
 			}
 
-			rc = getaddrinfo (NULL, NULL, (const struct addrinfo *) &ai, &res);
-			if (rc)
+			if (NULL == sastr)
 			{
-				nvmi_warn ("Failed to decode addrinfo struct");
-				continue;
+				nvmi_warn ("Failed to read process IP address in sockaddr, pid=%d",
+					   evt->task->pid);
+				break;
 			}
 
-			//printf ("\targ %d: %s", i+1, res->ai_cannonname);
-			freeaddrinfo (res);
+			snprintf (buf2, sizeof(buf2) - 1, " \"%s\",", (const char *)dst->addr);
+			strncat (buf, buf2, sizeof(buf) - strlen(buf) - 1);
+
+			len = offsetof(sock_addr_t, addr) + strlen(sastr);
+
+			event.u.syscall.args[i].type = htobe32 (SYSCALL_ARG_TYPE_SOCKADDR);
+			event.u.syscall.args[i].len  = htobe32 (len);
+			event.u.syscall.args[i].val.offset = htobe64 (output_ofs);
+
+			input_ofs += len;
+			output_ofs += len;
 			break;
 		}
-
-#endif
-		case NVMI_ARG_TYPE_SA: // FIXME: for now, don't deref SA
-			event.u.syscall.args[i].type = htobe32 (SYSCALL_ARG_TYPE_SOCKADDR);
-			event.u.syscall.args[i].len  = htobe32 (0);
-			event.u.syscall.args[i].val.long_val = htobe64 (val);
-			break;
-
+		case NVMI_ARG_TYPE_PVOID:
 		case NVMI_ARG_TYPE_SCALAR:
 			event.u.syscall.args[i].type = htobe32 (SYSCALL_ARG_TYPE_SCALAR);
-			event.u.syscall.args[i].val.long_val = htobe64 (val);
-
-			snprintf (buf2, sizeof(buf2), " %lx,", val);
-			strncat (buf, buf2, sizeof(buf) - strlen(buf) - 1);
-			break;
-
-		case NVMI_ARG_TYPE_PVOID:
-			event.u.syscall.args[i].type = htobe32 (SYSCALL_ARG_TYPE_PVOID);
 			event.u.syscall.args[i].val.long_val = htobe64 (val);
 
 			snprintf (buf2, sizeof(buf2), " %lx,", val);
@@ -1514,7 +1515,7 @@ consume_syscall_event (nvmi_event_t * evt)
 
 #if defined(ARM64)
 	snprintf (buf2, sizeof(buf2), ")	proc=%s	pid=%d	 TTBR0=%" PRIx32 "	TTBR1=%" PRIx32 "",
-		  evt->task->comm, evt->task->pid, evt->task->task_dtb, evt->r.arm.r.ttbr1);
+		  evt->task->comm, evt->task->pid, evt->task->dtb, evt->r.arm.r.ttbr1);
 #else
 	snprintf (buf2, sizeof(buf2), ")	proc=%s		pid=%d		CR3=%" PRIx64 "",
 		  evt->task->comm, evt->task->pid, evt->r.x86.r.cr3);
@@ -1523,7 +1524,7 @@ consume_syscall_event (nvmi_event_t * evt)
 
 	if (gstate.use_comms)
 	{
-		size += dataofs;
+		size += output_ofs;;
 		event.len = htobe32 (size);
 		rc = zmq_send (gstate.zmq_event_socket, &event, size, 0);
 		if (rc < 0)
@@ -1533,17 +1534,6 @@ consume_syscall_event (nvmi_event_t * evt)
 	}
 
 	nvmi_info ("%s", buf);
-
-	// If the syscall triggers a process context reset, destroy it now to force rebuild.
-	if (cbi->state.reset_ctx)
-	{
-		nvmi_info ("Invalidating context of task pid=%d", evt->task->pid);
-
-		g_rw_lock_writer_lock (&gstate.context_lock);
-		g_hash_table_remove (gstate.context_lookup, (gpointer) evt->task->key);
-		g_rw_lock_writer_unlock (&gstate.context_lock);
-	}
-
 	return rc;
 }
 
@@ -1591,12 +1581,17 @@ nvmi_event_consumer (gpointer data)
 			break;
 		}
 
-		// destroy the event: TODO - fix refct mismanagement!!
-		//		deref_task_context ((gpointer)&evt->task);
-		//		__sync_fetch_and_sub (&evt->task->refct, 1);
+		// If the event triggers a process context reset, destroy it now to force rebuild.
+		if (cbi->state.reset_ctx)
+		{
+			nvmi_info ("Invalidating context of task pid=%d", evt->task->pid);
 
-		//deref_task_context ((gpointer) evt->task);
-//		free_task_context (evt->task);
+			g_rw_lock_writer_lock (&gstate.context_lock);
+			g_hash_table_remove (gstate.context_lookup, (gpointer) evt->task->key);
+			g_rw_lock_writer_unlock (&gstate.context_lock);
+		}
+
+		// All done with the event
 		g_slice_free (nvmi_event_t, evt);
 	} // while
 

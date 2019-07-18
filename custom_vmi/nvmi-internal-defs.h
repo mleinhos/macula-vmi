@@ -11,10 +11,25 @@
 
 #include <glib.h>
 #include <libvmi/libvmi.h>
+
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <arpa/inet.h>
+
 #include "nvmi-public-defs.h"
 #include "nvmi-common.h"
 
 #define NVMI_MAX_ARG_MEM SYSCALL_MAX_ARG_BUF
+
+
+
+// Used to hold IPv4 or IPv6 addr
+typedef union
+{
+	struct sockaddr_un su;
+	struct sockaddr_in  s4;
+	struct sockaddr_in6 s6;
+} nvmi_generic_addr_t;
 
 
 /**
@@ -55,8 +70,8 @@ static int nvmi_syscall_arg_regs[] = { RDI, RSI, RDX, R10, R8, R9 };
  */
 typedef struct _nvmi_task_info
 {
-	addr_t     kstack;      // base of kernel stack
-	addr_t     task_dtb;
+	addr_t     kstack;      // base of task's kernel stack
+	addr_t     dtb;         // task's page dir base
 
 	addr_t     key;         // the key used to put this into hash table
 	addr_t     task_struct; // addr of task_struct
@@ -66,7 +81,9 @@ typedef struct _nvmi_task_info
 	vmi_pid_t  pid;
 	char       comm[PROCESS_MAX_COMM_NAME];
 
-	// TODO: get full path to binary via task->mm->??, since it's a file-backed mmap()
+	// TODO: get full path to binary via task->mm->??, since it's
+	// a file-backed mmap(). In alternate, save path passed to
+	// sys_execve().
 	char       path[PROCESS_MAX_PATH];
 
 	// FIXME: How many live events reference this task info? Destroyed when 0.

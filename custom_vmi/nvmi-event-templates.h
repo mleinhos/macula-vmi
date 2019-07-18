@@ -97,7 +97,7 @@ nvmi_syscalls [NVMI_MAX_SYSCALL_CT] =
 	  .name = "sys_accept", .argct = 3,
 	  .state = { .derefs = 1, .enabled = 1},
 	  .args = { { .type = NVMI_ARG_TYPE_SCALAR },
-		    { .type = NVMI_ARG_TYPE_SA     } ,
+		    { .type = NVMI_ARG_TYPE_PVOID  } , // sockaddr* but meaningless until accept() returns
 		    { .type = NVMI_ARG_TYPE_PVOID } } },
 
 	{ .cb_type = NVMI_CALLBACK_SYSCALL,

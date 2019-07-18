@@ -50,10 +50,26 @@ typedef struct _timeval
 } NVMI_STRUCT_ATTRIBS timeval_t;
 
 
+
+// ASCII representation of socket address.
+// Max chars needed for IPv6 addr is 45, max for UNIX domain socket is 108.
+
+#define NVMI_MAX_IP_ADDR_BINLEN 108
+#define NVMI_MAX_IP_ADDR_STRLEN 108
+
+enum sock_families
+{
+	SOCK_TYPE_UNSET = 0,
+	SOCK_TYPE_UNIX  = 1,
+	SOCK_TYPE_IP4   = 2,
+	SOCK_TYPE_IP6   = 3,
+};
+
 typedef struct _sock_addr
 {
 	uint16_t family;
-	uint8_t  data[SOCKADDR_MAX_LEN];
+	uint16_t port;
+	char     addr[NVMI_MAX_IP_ADDR_STRLEN]; // real length stored in event
 } NVMI_STRUCT_ATTRIBS sock_addr_t;
 
 
