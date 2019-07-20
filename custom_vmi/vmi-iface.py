@@ -54,9 +54,10 @@ SYSCALL_ARG_TYPE_STR      = 20
 SYSCALL_ARG_TYPE_WSTR     = 21
 SYSCALL_ARG_TYPE_SOCKADDR = 22
 
-REQUEST_TYPE_NONE = 0
-REQUEST_TYPE_PROCKILL = 1
-REQUEST_TYPE_SET_EVENT_LIMIT = 2
+REQUEST_TYPE_NONE                 = 0
+REQUEST_TYPE_PROCKILL             = 0x101
+REQUEST_TYPE_SET_PROC_EVENT_LIMIT = 0x102
+REQUEST_TYPE_SET_PROC_TRIGGERED_TIMEOUT = 0x103
 
 
 class nvmi_iface:
@@ -66,6 +67,7 @@ class nvmi_iface:
         self.ecount = 0
         self._request_id = 1 # starting request ID
         self.pending_kills = dict() # maps: PID -> request id
+        self.pending_responses = 0 # how many responses are outstanding?
         self._verbose = verbose
 
     def _get_next_request_id(self):
@@ -183,14 +185,36 @@ class nvmi_iface:
         data = struct.pack("!QIQQ", _id, REQUEST_TYPE_PROCKILL, target_pid, 0)
         self.rchannel.send(data)
         self.pending_kills [_id] = target_pid
+        self.pending_responses += 1
+        return _id
 
+    def request_proc_event_limit (self, target_pid, limit):
+        _id = self._get_next_request_id()
+
+        data = struct.pack("!QIQQ", _id, REQUEST_TYPE_SET_PROC_EVENT_LIMIT, target_pid, limit)
+        self.rchannel.send(data)
+        self.pending_responses += 1
+        return _id
+
+
+    def request_proc_triggered_timeout (self, target_pid, timeout_ms):
+        _id = self._get_next_request_id()
+
+        data = struct.pack("!QIQQ", _id, REQUEST_TYPE_SET_PROC_TRIGGERED_TIMEOUT, target_pid, timeout_ms)
+        self.rchannel.send(data)
+        self.pending_responses += 1
+        return _id
+
+    
     def request_set_event_count (self, new_count):
         _id = self._get_next_request_id()
         pass
 
+    
     def pending_requests(self):
-        return len(self.pending_kills)
+        return self.pending_responses
 
+    
     def get_response(self):
         try:
             data = self.rchannel.recv(zmq.NOBLOCK)
@@ -202,7 +226,7 @@ class nvmi_iface:
             response = struct.unpack("!QI", data)
             if data[0] in self.pending_kills:
                 del self.pending_kills[data[0]]
-
+                self.pending_responses -= 1
             return response
         
 
@@ -230,6 +254,12 @@ if __name__ == '__main__':
 
         syscall_ct[pid] = syscall_ct.get(pid,0) + 1
 
+        if evt['type'] == 'syscall':
+            if evt['syscall_name'] == 'sys_execve':
+                nvmi.request_proc_triggered_timeout (pid, 750)
+            elif evt['syscall_name'] == 'sys_connect':
+                nvmi.request_proc_event_limit (pid, 5000)
+        
         if pname in ('ps','w') and syscall_ct[pid] > 10:
             print ("Attempting to kill pid {}".format(pid))
             nvmi.request_proc_kill (pid)

@@ -86,7 +86,10 @@ typedef struct _nvmi_cb_info
 
 
 /**
- * All the syscalls we have signatres on. Feel free to add more. 
+ * All the syscalls we have signatres on. Feel free to add
+ * more. Allocate space here for more entries than we define, so that
+ * there's space for additional dynmaically-generated entries for the
+ * syscalls not specified here.
  *
  * KEEP THIS LIST ALPHABETIZED!
  */

@@ -210,14 +210,21 @@ typedef struct _event_t
 } NVMI_STRUCT_ATTRIBS event_t;
 
 
-// Description of a request sent from the controller to the VMI component
+// Description of a request sent from the controller to the VMI component.
 
+#define REQUEST_MODIFIES_TASK 0x100
 enum request_codes
 {
 	REQUEST_CMD_NONE = 0,
-	REQUEST_CMD_PROCKILL = 1,
-	REQUEST_CMD_SET_EVENT_LIMIT = 2,
-	REQUEST_CMD_GET_PROC_CONTEXT = 3,
+
+	// arg1: pid
+	REQUEST_CMD_PROCKILL = (REQUEST_MODIFIES_TASK | 1),
+
+	// arg1: pid, arg2: numerical limit
+	REQUEST_CMD_SET_PROC_EVENT_LIMIT = (REQUEST_MODIFIES_TASK | 2),
+
+	// arg1: pid, arg2: timeout in milliseconds
+	REQUEST_CMD_SET_PROC_TRIGGERED_TIMEOUT = (REQUEST_MODIFIES_TASK | 3),
 };
 typedef uint32_t request_code_t;
 

@@ -75,13 +75,6 @@
 #   define DUMP_STATS_INTERVAL 100000
 #endif //  DUMP_STATS_INTERVAL
 
-			// Used to hold IPv4 or IPv6 addr
-			typedef union
-			{
-				struct sockaddr_in  s4;
-				struct sockaddr_in6 s6;
-			} generic_addr_t;
-
 //
 // Special instrumentation points
 //
@@ -106,7 +99,8 @@ nvmi_special_cbs[] =
 // - offload as much work as possible to consumer thread or to a post callback (notification of second VMI event)
 //
 
-typedef struct _nvmi_state {
+typedef struct _nvmi_state
+{
 	int act_calls;
 	atomic_t event_id;
 
@@ -231,7 +225,10 @@ dump_cb_stats(void)
 	for (int i = 0; i < NUMBER_OF(nvmi_syscalls); ++i)
 	{
 		nvmi_cb_info_t * cbi = &nvmi_syscalls[i];
-		if (0 == cbi->hitct) continue;
+		if (0 == cbi->hitct)
+		{
+			continue;
+		}
 
 		nvmi_warn ("Called % 16d times: %s", cbi->hitct, cbi->name);
 	}
@@ -239,7 +236,10 @@ dump_cb_stats(void)
 	for (int i = 0; i < NUMBER_OF(nvmi_special_cbs); ++i)
 	{
 		nvmi_cb_info_t * cbi = &nvmi_special_cbs[i];
-		if (0 == cbi->hitct) continue;
+		if (0 == cbi->hitct)
+		{
+			continue;
+		}
 
 		nvmi_warn ("Called % 16d times: %s", cbi->hitct, cbi->name);
 	}
@@ -374,10 +374,10 @@ cb_current_pid  (vmi_instance_t vmi,
 	local_curr = (addr_t) regs->arm.sp_el0;
 #else
 	// gs --> 64 bit, fs --> 32 bit
-	status = vmi_read_addr_va(vmi,
-				  regs->x86.r.gs_base + gstate.va_current_task,
-				  0,
-				  &local_curr);
+	status = vmi_read_addr_va (vmi,
+				   regs->x86.r.gs_base + gstate.va_current_task,
+				   0,
+				   &local_curr);
 	if (VMI_SUCCESS != status)
 	{
 		rc = EIO;
@@ -388,7 +388,7 @@ cb_current_pid  (vmi_instance_t vmi,
 #endif
 
 	// Get current->pid
-	status = vmi_read_32_va(vmi, local_curr + gstate.task_pid_ofs, 0, &local_pid);
+	status = vmi_read_32_va (vmi, local_curr + gstate.task_pid_ofs, 0, &local_pid);
 	if (VMI_FAILURE == status)
 	{
 		rc = EFAULT;
@@ -422,10 +422,10 @@ cb_current_task (vmi_instance_t vmi,
 
 #else
 	// x86 - slow: get current; alternate: get base of task kernel struct
-	status_t status = vmi_read_addr_va(vmi,
-					   regs->x86.r.gs_base + gstate.va_current_task,
-					   0,
-					   task);
+	status_t status = vmi_read_addr_va (vmi,
+					    regs->x86.r.gs_base + gstate.va_current_task,
+					    0,
+					    task);
 	if (VMI_SUCCESS != status)
 	{
 		rc = EIO;
@@ -470,10 +470,10 @@ cb_build_task_context (vmi_instance_t vmi,
 	(*tinfo)->task_struct = curr_task;
 
 	// Get current->pid
-	status = vmi_read_32_va(vmi,
-				curr_task + gstate.task_pid_ofs,
-				0,
-				&(*tinfo)->pid);
+	status = vmi_read_32_va (vmi,
+				 curr_task + gstate.task_pid_ofs,
+				 0,
+				 &(*tinfo)->pid);
 	if (VMI_FAILURE == status)
 	{
 		rc = EFAULT;
@@ -589,6 +589,7 @@ cb_gather_context (vmi_instance_t vmi,
 		g_rw_lock_writer_unlock (&gstate.context_lock);
 
 		// Policy
+		task->trigger_event_limit_active = true;
 		task->trigger_event_limit = TRIGGER_EVENT_LIMIT;
 		// The table owns a reference to the task context.
 //		atomic_inc (&task->refct);
@@ -740,8 +741,21 @@ exit:
 }
 
 
+static bool
+timeout_is_expired (const struct timeval * ts)
+{
+	struct timeval now = {0};
+
+	gettimeofday (&now, NULL);
+
+	return (now.tv_sec > ts->tv_sec ||
+		(now.tv_sec == ts->tv_sec && now.tv_usec > ts->tv_usec));
+}
+
 /**
  * Policy!!
+ *
+ * FIXME: This code modifies a the NVMI task structure without a lock or reference.
  */
 static inline void
 cb_update_trigger_state (nvmi_cb_info_t * cbi,
@@ -762,25 +776,38 @@ cb_update_trigger_state (nvmi_cb_info_t * cbi,
 		if (!task->triggered)
 		{
 			new_level = NVMI_MONITOR_LEVEL_ACTIVE;
-			nvmi_info ("Initiating trigger: event %s proc %s", cbi->name, task->comm);
+			nvmi_warn ("Initiating trigger: event %s proc %s", cbi->name, task->comm);
 			atomic_inc (&gstate.triggered_procs);
 			task->triggered = true;
 		}
 		task->events_since_trigger = 0;
 	}
 
-	// Now test whether this event makes the level drop back down
-	if (ct == task->trigger_event_limit)
+	// Now test whether this event makes the level drop back
+	// down. That can happen two ways: (1) event count has been
+	// reached, or (2) trigger timeout has been reached.
+
+	// N.B. trigger_event_limit_active starts off as "true"
+	if (task->trigger_event_limit_active &&
+	    ct == task->trigger_event_limit)
 	{
-		clog_info (CLOG(CLOGGER_ID), "Saw over threshold of events (%d)",
-			   task->trigger_event_limit);
+		nvmi_warn ("Saw over threshold of events (%d)", task->trigger_event_limit);
+		task->trigger_event_limit_active = false;
+		task_untriggered = true;
+	}
+
+	if (task->trigger_timeout_active &&
+	    timeout_is_expired (&task->trigger_timeout))
+	{
+		nvmi_warn ("Trigger timeout has expired for task pid=%ld", task->pid);
+		task->trigger_timeout_active = false;
 		task_untriggered = true;
 	}
 
 	// Other possibility: this event causes task to untrigger (e.g. process death)
 	if (cbi->state.trigger_off)
 	{
-		clog_info (CLOG(CLOGGER_ID), "Event untriggers task");
+		nvmi_warn ("Event %s untriggers task", cbi->name);
 		new_level = NVMI_MONITOR_LEVEL_TRIGGERS;
 		task_untriggered = true;
 	}
@@ -788,7 +815,7 @@ cb_update_trigger_state (nvmi_cb_info_t * cbi,
 	if (task_untriggered)
 	{
 		unsigned long pct = atomic_dec (&gstate.triggered_procs);
-		nvmi_info ("Saw over threshold of events (task %s, count %d), or event (%s) untriggers",
+		nvmi_warn ("Saw over threshold of events (task %s, count %d), event (%s) untriggers, or trigger timed out",
 			   task->comm, ct, cbi->name);
 
 		task->triggered = false;
@@ -796,7 +823,7 @@ cb_update_trigger_state (nvmi_cb_info_t * cbi,
 
 		if (0 == pct)
 		{
-			nvmi_info ("No triggered processes remain");
+			nvmi_warn ("No triggered processes remain");
 			new_level = NVMI_MONITOR_LEVEL_TRIGGERS;
 		}
 	}
@@ -1147,7 +1174,7 @@ instrument_syscall (char *name, addr_t kva)
 	nvmi_info ("#%d: Monitoring symbol %s at %" PRIx64 "",
 		   gstate.act_calls, name, kva);
 
-	// Stage syscall dynamically; name only
+	// Stage syscall dynamically; add a minimal entry to the global array
 	if (NULL == cbi)
 	{
 		nvmi_info ("monitoring syscall %s without a template", name);
@@ -1177,8 +1204,9 @@ exit:
 
 /**
  * Attempts to match the given symbol to a special instrumentation
- * point of a syscall. If it matched, returns 0. If it doesn't match,
- * returns ENOENT. Otherwise, returns another error code.
+ * point or a syscall. If it matched, returns 0. If it doesn't match,
+ * returns ENOENT. If some other error happened, returns another error
+ * code.
  */
 static int
 set_instr_point (char * symname,
@@ -1234,6 +1262,8 @@ set_instr_points_rekall (void)
 		goto exit;
 	}
 
+	// Process every symbol: the instrumentation point setters get
+	// to decide whether it should be hooked.
 	it = json_object_iter_begin (constants);
 	it_end = json_object_iter_end (constants);
 
@@ -1248,8 +1278,6 @@ set_instr_points_rekall (void)
 			kva |= 0xffff000000000000;
 		}
 
-		// Process every symbol: the instrumentation point
-		// setters get to decide whether it should be hooked.
 		rc = set_instr_point (symname, kva);
 		if (rc != 0 && rc != ENOENT)
 		{
@@ -1342,19 +1370,25 @@ consume_special_event (nvmi_event_t * evt)
 	}
 	else if (cbi == &nvmi_special_cbs[NVMI_FD_INSTALL_IDX])
 	{
+		reg_t fd = 0;
 		populate_outbound_event (evt, EVENT_TYPE_FILE_CREATE, &event);
 		size += sizeof(file_creation_event_t);
 
 #if defined(ARM64)
-		event.u.fcreate.file_no = htobe32 (evt->r.syscall_args[0]);
+		fd = evt->r.syscall_args[0];
 #else
-		event.u.fcreate.file_no = htobe32 (evt->r.x86.r.rdi);
+		fd = evt->r.x86.r.rdi;
 #endif
+		event.u.fcreate.file_no = htobe32 (fd);
+		nvmi_info ("fd=%d installed into process pid=%ld comm=%s",
+			   fd, evt->task->pid, evt->task->comm);
 	}
 	else if (cbi == &nvmi_special_cbs[NVMI_DO_FORK_IDX])
 	{
 		populate_outbound_event (evt, EVENT_TYPE_PROCESS_CREATE, &event);
 		size += sizeof(process_creation_event_t);
+		nvmi_info ("fork() in process pid=%ld comm=%s",
+			   evt->task->pid, evt->task->comm);
 	}
 	else
 	{
@@ -1451,7 +1485,7 @@ consume_syscall_event (nvmi_event_t * evt)
 				dst->family = htobe16 (SOCK_TYPE_UNIX);
 				dst->port   = 0;
 				sastr = strncpy ((char *) &dst->addr, src->su.sun_path, SYSCALL_MAX_ARG_BUF - output_ofs);
-				break;				
+				break;
 			case AF_INET:
 				dst->family = htobe16 (SOCK_TYPE_IP4);
 				dst->port    = htobe16 (src->s4.sin_port);
@@ -1460,25 +1494,26 @@ consume_syscall_event (nvmi_event_t * evt)
 				break;
 			case AF_INET6:
 				dst->family = htobe16 (SOCK_TYPE_IP6);
-				dst->port    = htobe16 (src->s6.sin6_port);
+				dst->port   = htobe16 (src->s6.sin6_port);
 				sastr = inet_ntop (AF_INET6, &(src->s6.sin6_addr),
 						   (char *) &dst->addr, SYSCALL_MAX_ARG_BUF - output_ofs);
 				break;
 			default:
+				dst->family = 0;
+				dst->port   = 0;
 				break;
 			}
 
 			if (NULL == sastr)
 			{
-				nvmi_warn ("Failed to read process IP address in sockaddr, pid=%d",
-					   evt->task->pid);
-				break;
+				nvmi_warn ("Failed to read process socket address, pid=%d comm=%s",
+					   evt->task->pid, evt->task->comm);
 			}
+
+			len = offsetof(sock_addr_t, addr) + (sastr ? strlen(sastr) : 0);
 
 			snprintf (buf2, sizeof(buf2) - 1, " \"%s\",", (const char *)dst->addr);
 			strncat (buf, buf2, sizeof(buf) - strlen(buf) - 1);
-
-			len = offsetof(sock_addr_t, addr) + strlen(sastr);
 
 			event.u.syscall.args[i].type = htobe32 (SYSCALL_ARG_TYPE_SOCKADDR);
 			event.u.syscall.args[i].len  = htobe32 (len);
@@ -1762,12 +1797,9 @@ comms_request_servicer (gpointer data)
 		req.arg1 = be64toh (req.arg1);
 		req.arg2 = be64toh (req.arg2);
 
-		switch (req.cmd)
+		// If the request modifies a task state, find that task here
+		if (req.cmd & REQUEST_MODIFIES_TASK)
 		{
-		case REQUEST_CMD_PROCKILL:
-			nvmi_warn ("Received request %lx to kill PID %d", req.id, req.arg1);
-
-			// Set global killpid: now syscall hook will watch for this pid
 			rc = find_task_context_by_pid (req.arg1, &task);
 			if (rc)
 			{
@@ -1776,23 +1808,65 @@ comms_request_servicer (gpointer data)
 				response_created = true;
 				nvmi_warn ("Request %lx indicated invalid PID %d: %d",
 					   req.id, req.arg1, rc);
-				break;
+				goto issue_response;
 			}
+		}
 
+		// Most requests get an immediate response
+		response_created = true;
+			
+		switch (req.cmd)
+		{
+		case REQUEST_CMD_PROCKILL:
+			nvmi_warn ("Received request %lx to kill PID %d", req.id, req.arg1);
 			task->pending_kill_request_id = req.id;
+			response_created = false;
 			break;
+		case REQUEST_CMD_SET_PROC_EVENT_LIMIT:
+			// arg1: pid, arg2: numerical limit
+			nvmi_warn ("Received request %lx to set event limit to %d for pid=%ld",
+				   req.id, req.arg2, req.arg1);
+			task->trigger_event_limit_active = true;
+			task->trigger_event_limit = req.arg2;
 
-		case REQUEST_CMD_SET_EVENT_LIMIT:
-			nvmi_warn ("Received request %lx to set event limit to %d", req.arg1);
 			res.id = htobe64 (req.id);
 			res.status = htobe32 (0);
-			response_created = true;
 			break;
+		case REQUEST_CMD_SET_PROC_TRIGGERED_TIMEOUT:
+		{
+			struct timeval time = {0};
+			unsigned long ms = req.arg2;
+			
+			// arg1: pid, arg2: timeout in milliseconds
+			gettimeofday (&time, NULL);
+			nvmi_warn ("Received request %lx to set trigger timeout in pid=%ld %ld MS from now, curr time = %ld.%ld",
+				   req.id, req.arg1, req.arg2, time.tv_sec, time.tv_usec);
 
+			// Timeout: now + specified milliseconds. Add a MS back in due to precision loss.
+			ms += time.tv_usec / 1000 + 1;
+
+			// Handle overflow
+			if (ms > 1000)
+			{
+				time.tv_sec += 1;
+				ms -= 1000;
+			}
+			time.tv_usec = ms * 1000;
+			task->trigger_timeout_active = true;
+			task->trigger_timeout = time;
+
+			nvmi_warn ("Request %lx: trigger timeout in pid=%ld set to %ld.%ld",
+				   req.id, req.arg1, time.tv_sec, time.tv_usec);
+
+			res.id = htobe64 (req.id);
+			res.status = htobe32 (0);
+			break;
+		}
 		default:
 			break;
 		}
 
+	issue_response:
 		if (response_created)
 		{
 			rc = zmq_send (gstate.zmq_request_socket, &res, sizeof(res), 0);

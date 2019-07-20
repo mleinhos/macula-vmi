@@ -22,11 +22,13 @@
 #define NVMI_MAX_ARG_MEM SYSCALL_MAX_ARG_BUF
 
 
-
-// Used to hold IPv4 or IPv6 addr
+/**
+ * Used to hold UNIX path or IP addr. All composite types here start
+ * with an sa_family_t.
+ */
 typedef union
 {
-	struct sockaddr_un su;
+	struct sockaddr_un  su;
 	struct sockaddr_in  s4;
 	struct sockaddr_in6 s6;
 } nvmi_generic_addr_t;
@@ -90,12 +92,22 @@ typedef struct _nvmi_task_info
 	unsigned long refct;
 
 	// If not 0, this is the request ID from NBrain that asked for the death of this process
-	uint64_t       pending_kill_request_id;
+	uint64_t      pending_kill_request_id;
 	unsigned long kill_attempts;
+
+	// Task is currently causing the switch to ACTIVE view 
+	bool triggered;
+
+	// Switch to active view has an event limitation on it
+	bool          trigger_event_limit_active;
+	unsigned long trigger_event_limit;
+
+	// Switch to active view has an expiration on it
+	bool           trigger_timeout_active;
+	struct timeval trigger_timeout;
+
 	unsigned long events_since_trigger;
 
-	bool triggered; // caused current switch to ACTIVE view
-	unsigned long trigger_event_limit;
 } nvmi_task_info_t;
 
 

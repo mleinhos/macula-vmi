@@ -3,7 +3,7 @@ _arch = $(shell uname -m)
 CC = gcc
 
 CFLAGS = -I../common -I.
-CFLAGS += -DTRIGGER_EVENT_LIMIT=50000000
+CFLAGS += -DTRIGGER_EVENT_LIMIT=5000
 
 #CFLAGS += -O3 -g
 CFLAGS += -O0 -ggdb
