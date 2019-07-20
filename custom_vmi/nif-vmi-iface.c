@@ -72,8 +72,8 @@ typedef struct
 	vmi_instance_t vmi;
 	vmi_event_t main_event;
 	vmi_event_t ss_event[MAX_VCPUS]; // SS events: Intel only
+	vmi_event_t mem_event; // #VE permission violation, Intel only
 
-//	nvmi_level_t curr_level;
 	nvmi_level_t requested_level;
 
 	// View where just a few pivital points are instrumented. For
@@ -358,6 +358,59 @@ exit:
 #else
 
 /**
+ * Callback for a memory event (a #VE) on Intel only. The only way to
+ * invoke this is for the guest to attempt to read/write a shadow
+ * page, which we block here by switching over to the default view and
+ * single stepping.
+ *
+ * This callback must exit with the hook in the state expected by the
+ * SS handler, provided that the access occurs on a hook (it could
+ * occur anywhere on a hook's frame).
+ */
+static event_response_t
+_internal_hook_ve_cb (vmi_instance_t vmi, vmi_event_t* event)
+{
+	mem_access_event_t * me = &event->mem_event;
+	const char * access = (me->out_access & VMI_MEMACCESS_W) ? "write" : "read";
+	nif_page_node* pgnode = NULL;
+	nif_hook_node* hook_node = NULL;
+	addr_t gpa = 0;
+
+	// Lookup the guest physical addr.
+	gpa = MKADDR(me->gfn, me->offset);
+
+	// FIXME: Not really an error internal to this code, but an
+	// alert that should be relayed to NBrain
+	nvmi_error ("DomU attempted to %s guest VA=%lx PA=%lx (during walk? %d)!!!",
+		    access, me->gla, gpa, me->gptw);
+
+	hook_node = g_hash_table_lookup (gnif.gpa_hook_mappings, GSIZE_TO_POINTER(gpa));
+
+	gnif.vcpu_hook_nodes [event->vcpu_id] = hook_node;
+	if (NULL == hook_node)
+	{
+		nvmi_error ("No BP record found for this GPA %" PRIx64 ".", gpa);
+		goto exit;
+	}
+
+	// We found the hook node. Lock it or bail out. First store it for SS callback.
+	hook_node->rlocked = g_rw_lock_reader_trylock (&hook_node->lock);
+	if (!hook_node->rlocked)
+	{
+		nvmi_error ("Warning: Failed to acquire hook lock %s.", hook_node->name);
+		goto exit;
+	}
+
+
+exit:
+	// Switch to clean view and trigger the SS for the access
+	event->slat_id = ALTP2M_DEFAULT_VIEW;
+	return VMI_EVENT_RESPONSE_TOGGLE_SINGLESTEP
+		| VMI_EVENT_RESPONSE_VMM_PAGETABLE_ID;
+}
+
+
+/**
  * _internal_hook_cb() for Intel
  *
  * The main callback for Xen events. In turn, calls registered callbacks above this layer.
@@ -416,6 +469,7 @@ static void
 free_nif_page_node (gpointer data)
 {
 	nif_page_node* pnode = data;
+	bool trigger = false;
 
 	nvmi_debug ("Disabling monitoring of mfn=%" PRIx64 ", shadow=%" PRIx64,
 		    pnode->orig_frame, pnode->shadow_frame);
@@ -429,6 +483,11 @@ free_nif_page_node (gpointer data)
 		{
 			nif_hook_node * node = (nif_hook_node *) ihook->data;
 			addr_t gpa = MKADDR (pnode->orig_frame, node->offset);
+
+			if (node->trigger)
+			{
+				trigger = true;
+			}
 
 			if (g_hash_table_contains (gnif.gpa_hook_mappings, GSIZE_TO_POINTER(gpa)))
 			{
@@ -448,6 +507,11 @@ free_nif_page_node (gpointer data)
 
 	// Stop monitoring
 	vmi_set_mem_event (gnif.vmi, pnode->shadow_frame, VMI_MEMACCESS_N, gnif.active_view);
+
+	if (trigger)
+	{
+		vmi_set_mem_event (gnif.vmi, pnode->shadow_frame, VMI_MEMACCESS_N, gnif.trigger_view);
+	}
 
 	xc_altp2m_change_gfn (gnif.xci, gnif.domain_id, gnif.active_view, pnode->shadow_frame, ALTP2M_DEFAULT_GFN);
 	xc_domain_decrease_reservation_exact (gnif.xci,
@@ -505,8 +569,8 @@ nif_enable_monitor (addr_t kva,
 		    void* cb_arg,
 		    bool is_trigger)
 {
-	int rc = 0;
-	size_t ret;
+	int rc = EACCES;
+	size_t size;
 	status_t status;
 	nif_page_node * pgnode  = NULL;
 	nif_hook_node * hook_node = NULL;
@@ -526,7 +590,6 @@ nif_enable_monitor (addr_t kva,
 #endif
 	if (VMI_SUCCESS != status)
 	{
-		rc = EACCES;
 		nvmi_error ("Failed to read orig val near %" PRIx64 "", kva);
 		goto exit;
 	}
@@ -534,7 +597,6 @@ nif_enable_monitor (addr_t kva,
 	status = vmi_pagetable_lookup (gnif.vmi, gnif.kdtb, kva, &pa);
 	if (VMI_SUCCESS != status)
 	{
-		rc = EINVAL;
 		nvmi_error ("Failed to find PA for kernel VA=%" PRIx64 "", kva);
 		goto exit;
 	}
@@ -551,7 +613,6 @@ nif_enable_monitor (addr_t kva,
 		rc = xc_domain_populate_physmap_exact (gnif.xci, gnif.domain_id, 1, 0, 0, (xen_pfn_t*)&shadow_frame);
 		if (rc < 0)
 		{
-			rc = ENOMEM;
 			nvmi_error ("Failed to allocate frame at %" PRIx64 "", shadow_frame);
 			goto exit;
 		}
@@ -560,7 +621,6 @@ nif_enable_monitor (addr_t kva,
 		rc = xc_altp2m_change_gfn (gnif.xci, gnif.domain_id, gnif.active_view, orig_frame, shadow_frame);
 		if (rc)
 		{
-			rc = EACCES;
 			nvmi_error ("Shadow: Unable to change mapping for active_view");
 			goto exit;
 		}
@@ -571,7 +631,6 @@ nif_enable_monitor (addr_t kva,
 		rc = xc_domain_populate_physmap_exact (gnif.xci, gnif.domain_id, 1, 0, 0, (xen_pfn_t*)&shadow_frame_ss);
 		if (rc < 0)
 		{
-			rc = ENOMEM;
 			nvmi_error ("Failed to allocate frame at %" PRIx64 "", shadow_frame_ss);
 			goto exit;
 		}
@@ -579,10 +638,21 @@ nif_enable_monitor (addr_t kva,
 		rc = xc_altp2m_change_gfn (gnif.xci, gnif.domain_id, gnif.ss_view, orig_frame, shadow_frame_ss);
 		if (rc)
 		{
-			rc = EACCES;
 			nvmi_error ("Shadow: Unable to change mapping for active_view");
 			goto exit;
 		}
+#else
+		// On Intel, trigger a #VE on unapproved access to the shadow frame
+//		status = vmi_set_mem_event (gnif.vmi, shadow_frame, VMI_MEMACCESS_W, gnif.active_view);
+//		status |= vmi_set_mem_event (gnif.vmi, shadow_frame, VMI_MEMACCESS_W, gnif.trigger_view);
+		status = vmi_set_mem_event (gnif.vmi, orig_frame, VMI_MEMACCESS_W, gnif.active_view);
+		status |= vmi_set_mem_event (gnif.vmi, orig_frame, VMI_MEMACCESS_W, gnif.trigger_view);
+		if (VMI_FAILURE == status)
+		{
+			nvmi_error ("Shadow: Unable to protect from RW access");
+			goto exit;
+		}
+
 #endif
 		// Record the new translation
 		g_hash_table_insert (gnif.pframe_sframe_mappings,
@@ -600,28 +670,25 @@ nif_enable_monitor (addr_t kva,
 	if (NULL == pgnode)
 	{
 		// Copy orig frame into shadow
-		status = vmi_read_pa (gnif.vmi, MKADDR(orig_frame, 0), DOM_PAGE_SIZE, buff, &ret);
-		if (DOM_PAGE_SIZE != ret || status == VMI_FAILURE)
+		status = vmi_read_pa (gnif.vmi, MKADDR(orig_frame, 0), DOM_PAGE_SIZE, buff, &size);
+		if (DOM_PAGE_SIZE != size || status == VMI_FAILURE)
 		{
-			rc = EACCES;
 			nvmi_error ("Shadow: Failed to read target page, frame=%lx", orig_frame);
 			goto exit;
 		}
 
-		status = vmi_write_pa (gnif.vmi, MKADDR(shadow_frame, 0), DOM_PAGE_SIZE, buff, &ret);
-		if (DOM_PAGE_SIZE != ret || status == VMI_FAILURE)
+		status = vmi_write_pa (gnif.vmi, MKADDR(shadow_frame, 0), DOM_PAGE_SIZE, buff, &size);
+		if (DOM_PAGE_SIZE != size || status == VMI_FAILURE)
 		{
-			rc = EACCES;
 			nvmi_error ("Shadow: Failed to write to shadow page");
 			goto exit;
 		}
 
 #if defined(ARM64)
 		// Copy orig into shadow SS
-		status = vmi_write_pa (gnif.vmi, MKADDR(shadow_frame_ss, 0), DOM_PAGE_SIZE, buff, &ret);
-		if (DOM_PAGE_SIZE != ret || status == VMI_FAILURE)
+		status = vmi_write_pa (gnif.vmi, MKADDR(shadow_frame_ss, 0), DOM_PAGE_SIZE, buff, &size);
+		if (DOM_PAGE_SIZE != size || status == VMI_FAILURE)
 		{
-			rc = EACCES;
 			nvmi_error ("Shadow: Failed to write to shadow SS page");
 			goto exit;
 		}
@@ -644,7 +711,8 @@ nif_enable_monitor (addr_t kva,
 						 GSIZE_TO_POINTER(offset));
 		if (NULL != hook_node)
 		{
-			nvmi_error ("Found hook already in place for va %" PRIx64 "", kva);
+			rc = 0;
+			nvmi_warn ("Found hook already in place for va %" PRIx64 "", kva);
 			goto exit;
 		}
 	}
@@ -666,7 +734,6 @@ nif_enable_monitor (addr_t kva,
 #endif
 	if (VMI_SUCCESS != status)
 	{
-		rc = EACCES;
 		nvmi_error ("Failed to write trap val in a shadow page");
 		goto exit;
 	}
@@ -682,10 +749,18 @@ nif_enable_monitor (addr_t kva,
 		rc = xc_altp2m_change_gfn (gnif.xci, gnif.domain_id, gnif.trigger_view, orig_frame, shadow_frame);
 		if (rc)
 		{
-			rc = EACCES;
 			nvmi_error ("Shadow: Unable to change mapping for trigger_view");
 			goto exit;
 		}
+#if defined(X86_64)
+		// On Intel, trigger a #VE on unapproved access to the shadow frame
+		status =  vmi_set_mem_event (gnif.vmi, shadow_frame, VMI_MEMACCESS_RW, gnif.trigger_view);
+		if (VMI_FAILURE == status)
+		{
+			nvmi_error ("Shadow: Unable to protect from RW access");
+			goto exit;
+		}
+#endif
 	}
 
 	// Create new hook node and save it
@@ -701,10 +776,10 @@ nif_enable_monitor (addr_t kva,
 #if defined(ARM64)
 	hook_node->backup_val2 = orig2;
 #endif
-
 	g_hash_table_insert(pgnode->offset_bp_mappings, GSIZE_TO_POINTER(offset), hook_node);
 	g_hash_table_insert(gnif.gpa_hook_mappings, GSIZE_TO_POINTER(pa), hook_node);
 
+	rc = 0; // Success
 exit:
 	return rc;
 }
@@ -761,13 +836,20 @@ singlestep_cb(vmi_instance_t vmi, vmi_event_t* event)
 
 	nif_hook_node* hook_node = gnif.vcpu_hook_nodes [event->vcpu_id];
 
-	assert (NULL != hook_node); // && true == hook_node->locked);
-	if (NULL != hook_node)
+	// This can be invoked after an interrupt callback (in which
+	// case there will be a hook_node in the global array), or
+	// after a memevent callback (in which case there may not be a
+	// hook node). Handle either case here.
+
+	if (NULL == hook_node)
 	{
-		if (hook_node->post_cb)
-		{
-			hook_node->post_cb (vmi, NULL, hook_node->cb_arg);
-		}
+		nvmi_warn ("No hook node found. Assuming prior #VE callback.");
+		goto exit;
+	}
+
+	if (hook_node->post_cb)
+	{
+		hook_node->post_cb (vmi, NULL, hook_node->cb_arg);
 	}
 
 	if (hook_node->rlocked)
@@ -779,8 +861,9 @@ singlestep_cb(vmi_instance_t vmi, vmi_event_t* event)
 	{
 		nvmi_warn ("Found hook %s unlocked; not attempting unlock", hook_node->name);
 	}
-	event->slat_id = get_requested_view (true);
 
+exit:
+	event->slat_id = get_requested_view (true);
 	return (VMI_EVENT_RESPONSE_TOGGLE_SINGLESTEP |
 		VMI_EVENT_RESPONSE_VMM_PAGETABLE_ID);
 }
@@ -987,6 +1070,8 @@ unregister_ss_events (void)
 
 	(void) vmi_shutdown_single_step (gnif.vmi);
 
+	vmi_clear_event (gnif.vmi, &gnif.mem_event, NULL);
+
 /*
 	for (int i = 0; i < vmi_get_num_vcpus(gnif.vmi); i++)
 	{
@@ -1011,8 +1096,8 @@ register_events (void)
 		nvmi_error ("Failed to find the total VCPUs");
 		goto exit;
 	}
-	nvmi_info ("Domain vcpus=%d", vcpus);
 
+	nvmi_info ("Registering callbacks for VMI events. Domain vcpus=%d", vcpus);
 
 #if defined(ARM64)
 	// ARM: single event callback - privcall
@@ -1025,7 +1110,7 @@ register_events (void)
 	}
 
 #else
-	// Intel: two event callbacks: single step and interrupt
+	// Intel: three event callbacks: single step, interrupt, and mem event
 
 	for (int i = 0; i < vcpus; i++)
 	{
@@ -1050,6 +1135,16 @@ register_events (void)
 		nvmi_error ("Unable to register interrupt event");
 		goto exit;
 	}
+
+	// All #VE permission violations will be directed to a single CB
+	SETUP_MEM_EVENT (&gnif.mem_event, 0, VMI_MEMACCESS_RWX, _internal_hook_ve_cb, 1);
+
+	if (VMI_SUCCESS != vmi_register_event (gnif.vmi, &gnif.mem_event))
+	{
+		nvmi_error ("Unable to register mem event");
+		goto exit;
+	}
+
 #endif // ARM64
 
 exit:
@@ -1072,12 +1167,6 @@ nif_event_loop_worker (void * arg)
 	}
 
 	nvmi_info ("Starting VMI event loop");
-
-	rc = register_events();
-	if (rc)
-	{
-		goto exit;
-	}
 
 	nvmi_info ("Entering VMI event loop: resuming VM");
 	vmi_resume_vm (gnif.vmi);
@@ -1177,7 +1266,6 @@ int
 nif_init(const char* name,
 	 bool * nif_busy)
 {
-	vmi_event_t trap_event, mem_event, cr3_event;
 	status_t status;
 	int rc = 0;
 
@@ -1248,6 +1336,13 @@ nif_init(const char* name,
 	gnif.requested_level = NVMI_MONITOR_LEVEL_TRIGGERS;
 
 	nvmi_info ("Altp2m: active_view created and activated");
+
+	// Register callbacks
+	rc = register_events();
+	if (rc)
+	{
+		goto exit;
+	}
 
 	status = vmi_pid_to_dtb (gnif.vmi, 0, &gnif.kdtb);
 	if (VMI_FAILURE == status)
