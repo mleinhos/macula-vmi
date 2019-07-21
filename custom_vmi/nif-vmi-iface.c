@@ -125,6 +125,11 @@ typedef struct _nif_page_node
 	addr_t		orig_frame;
 	addr_t		shadow_frame;
 	addr_t		shadow_frame_ss;
+	// Intel: track whether a #VE is registred on the orig_frame,
+	// both for active view and for trigger view
+	bool            ve_cb_active;
+	bool            ve_cb_trigger;
+
 	GHashTable* 	offset_bp_mappings; // key:offset
 } nif_page_node;
 
@@ -506,11 +511,15 @@ free_nif_page_node (gpointer data)
 	}
 
 	// Stop monitoring
-	vmi_set_mem_event (gnif.vmi, pnode->shadow_frame, VMI_MEMACCESS_N, gnif.active_view);
-
-	if (trigger)
+	if (pnode->ve_cb_active)
 	{
-		vmi_set_mem_event (gnif.vmi, pnode->shadow_frame, VMI_MEMACCESS_N, gnif.trigger_view);
+		vmi_set_mem_event (gnif.vmi, pnode->orig_frame, VMI_MEMACCESS_N, gnif.active_view);
+		pnode->ve_cb_active = false;
+	}
+	if (pnode->ve_cb_trigger)
+	{
+		vmi_set_mem_event (gnif.vmi, pnode->orig_frame, VMI_MEMACCESS_N, gnif.trigger_view);
+		pnode->ve_cb_trigger = false;
 	}
 
 	xc_altp2m_change_gfn (gnif.xci, gnif.domain_id, gnif.active_view, pnode->shadow_frame, ALTP2M_DEFAULT_GFN);
@@ -533,13 +542,9 @@ int
 nif_is_monitored(addr_t kva, bool * monitored)
 {
 	int rc = 0;
-	addr_t pa, frame;
 	status_t status;
-	nif_page_node*  pgnode  = NULL;
+	addr_t pa = 0;
 	nif_hook_node* hook_node = NULL;
-
-	addr_t shadow;
-	addr_t shadow_frame, offset;
 
 	*monitored = false;
 
@@ -641,18 +646,6 @@ nif_enable_monitor (addr_t kva,
 			nvmi_error ("Shadow: Unable to change mapping for active_view");
 			goto exit;
 		}
-#else
-		// On Intel, trigger a #VE on unapproved access to the shadow frame
-//		status = vmi_set_mem_event (gnif.vmi, shadow_frame, VMI_MEMACCESS_W, gnif.active_view);
-//		status |= vmi_set_mem_event (gnif.vmi, shadow_frame, VMI_MEMACCESS_W, gnif.trigger_view);
-		status = vmi_set_mem_event (gnif.vmi, orig_frame, VMI_MEMACCESS_W, gnif.active_view);
-		status |= vmi_set_mem_event (gnif.vmi, orig_frame, VMI_MEMACCESS_W, gnif.trigger_view);
-		if (VMI_FAILURE == status)
-		{
-			nvmi_error ("Shadow: Unable to protect from RW access");
-			goto exit;
-		}
-
 #endif
 		// Record the new translation
 		g_hash_table_insert (gnif.pframe_sframe_mappings,
@@ -738,6 +731,20 @@ nif_enable_monitor (addr_t kva,
 		goto exit;
 	}
 
+#if defined(X86_64)
+	// On Intel, trigger a #VE on unapproved access to the shadow frame
+	if (!pgnode->ve_cb_active)
+	{
+		status = vmi_set_mem_event (gnif.vmi, orig_frame, VMI_MEMACCESS_RW, gnif.active_view);
+		if (VMI_FAILURE == status)
+		{
+			nvmi_error ("Shadow: Unable to protect from RW access");
+			goto exit;
+		}
+		pgnode->ve_cb_active = true;
+	}
+#endif
+
 	// In case of a triggering instr point, write it to the
 	// default view (for now). Note the TRAP_CODE was already
 	// written into shadow_frame.  FIXME:
@@ -754,11 +761,15 @@ nif_enable_monitor (addr_t kva,
 		}
 #if defined(X86_64)
 		// On Intel, trigger a #VE on unapproved access to the shadow frame
-		status =  vmi_set_mem_event (gnif.vmi, shadow_frame, VMI_MEMACCESS_RW, gnif.trigger_view);
-		if (VMI_FAILURE == status)
+		if (!pgnode->ve_cb_trigger)
 		{
-			nvmi_error ("Shadow: Unable to protect from RW access");
-			goto exit;
+			status =  vmi_set_mem_event (gnif.vmi, orig_frame, VMI_MEMACCESS_RW, gnif.trigger_view);
+			if (VMI_FAILURE == status)
+			{
+				nvmi_error ("Shadow: Unable to protect from RW access");
+				goto exit;
+			}
+			pgnode->ve_cb_trigger = true;			
 		}
 #endif
 	}

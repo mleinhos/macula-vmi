@@ -1072,7 +1072,6 @@ instrument_syscall (char *name, addr_t kva)
 {
 	int rc = 0;
 	nvmi_cb_info_t * cbi = NULL;
-	bool monitored = false;
 	// Point to the base (legacy style) of the syscall name,
 	// e.g. "sys_accept", from within __x64_sys_accept
 	char * lookup = NULL;
@@ -1139,19 +1138,6 @@ instrument_syscall (char *name, addr_t kva)
 		goto exit;
 	}
 
-	// Bail if we're already monitoring that point
-	rc = nif_is_monitored (kva, &monitored);
-	if (rc)
-	{
-		goto exit;
-	}
-
-	if (monitored)
-	{
-		nvmi_info ("KVA %" PRIx64 " (%s) is alraedy monitored", kva, name);
-		goto exit;
-	}
-
 	gstate.act_calls++;
 	if (gstate.act_calls == NVMI_MAX_SYSCALL_CT-1)  // max syscalls that we want to monitor
 	{
@@ -1213,6 +1199,15 @@ set_instr_point (char * symname,
 		 addr_t kva)
 {
 	int rc = 0;
+	bool monitored = false;
+
+	// Bail if we're already monitoring the point
+	rc = nif_is_monitored (kva, &monitored);
+	if (0 == rc && monitored)
+	{
+		nvmi_info ("KVA %" PRIx64 " (%s) is alraedy monitored", kva, symname);
+		goto exit;
+	}
 
 	rc = instrument_special_point (symname, kva);
 	if (0 == rc)
@@ -1277,6 +1272,8 @@ set_instr_points_rekall (void)
 		{
 			kva |= 0xffff000000000000;
 		}
+
+		nvmi_debug ("Processing symbol=%s kva=%lx", symname, kva);
 
 		rc = set_instr_point (symname, kva);
 		if (rc != 0 && rc != ENOENT)
