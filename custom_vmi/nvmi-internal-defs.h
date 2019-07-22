@@ -95,18 +95,19 @@ typedef struct _nvmi_task_info
 	uint64_t      pending_kill_request_id;
 	unsigned long kill_attempts;
 
-	// Task is currently causing the switch to ACTIVE view 
+	// Task is currently causing the switch to ACTIVE view via any
+	// trigger mechanism. FIXME: Fields below are accessed by
+	// multiple threads without synchronization!
 	bool triggered;
 
 	// Switch to active view has an event limitation on it
 	bool          trigger_event_limit_active;
 	unsigned long trigger_event_limit;
+	unsigned long events_since_trigger;
 
 	// Switch to active view has an expiration on it
 	bool           trigger_timeout_active;
 	struct timeval trigger_timeout;
-
-	unsigned long events_since_trigger;
 
 } nvmi_task_info_t;
 

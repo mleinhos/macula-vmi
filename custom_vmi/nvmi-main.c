@@ -772,7 +772,7 @@ cb_update_trigger_state (nvmi_cb_info_t * cbi,
 
 	if (cbi->state.trigger)
 	{
-		// Even if this has already caused a trigger, reset its stats
+		// Even if task is already trigger, reset its stats
 		if (!task->triggered)
 		{
 			new_level = NVMI_MONITOR_LEVEL_ACTIVE;
@@ -801,6 +801,8 @@ cb_update_trigger_state (nvmi_cb_info_t * cbi,
 	{
 		nvmi_warn ("Trigger timeout has expired for task pid=%ld", task->pid);
 		task->trigger_timeout_active = false;
+		//atomic_dec (&task->triggered_ct);
+		atomic_dec (&gstate.triggered_procs);
 		task_untriggered = true;
 	}
 
@@ -809,10 +811,15 @@ cb_update_trigger_state (nvmi_cb_info_t * cbi,
 	{
 		nvmi_warn ("Event %s untriggers task", cbi->name);
 		new_level = NVMI_MONITOR_LEVEL_TRIGGERS;
+		//atomic_dec (&task->triggered_ct);
+		atomic_dec (&gstate.triggered_procs);
 		task_untriggered = true;
 	}
 
-	if (task_untriggered)
+	// Task has no reason to remain triggered. Drop it.
+	if (task_untriggered &&
+	    !task->trigger_event_limit_active &&
+	    !task->trigger_timeout_active)
 	{
 		unsigned long pct = atomic_dec (&gstate.triggered_procs);
 		nvmi_warn ("Saw over threshold of events (task %s, count %d), event (%s) untriggers, or trigger timed out",
@@ -1201,11 +1208,11 @@ set_instr_point (char * symname,
 	int rc = 0;
 	bool monitored = false;
 
-	// Bail if we're already monitoring the point
+	// Bail if the address is invalid or we're already monitoring the point
 	rc = nif_is_monitored (kva, &monitored);
-	if (0 == rc && monitored)
+	if (EINVAL == rc || monitored)
 	{
-		nvmi_info ("KVA %" PRIx64 " (%s) is alraedy monitored", kva, symname);
+		rc = 0;
 		goto exit;
 	}
 
@@ -1774,6 +1781,8 @@ comms_request_servicer (gpointer data)
 		response_t res = {0};
 		bool response_created = false;
 		nvmi_task_info_t * task = NULL;
+		bool triggered = false;
+		bool increase = false;
 
 		rc = zmq_recv (gstate.zmq_request_socket, &req, sizeof(req), ZMQ_DONTWAIT);
 		if (rc <= 0)
@@ -1794,6 +1803,7 @@ comms_request_servicer (gpointer data)
 		req.arg1 = be64toh (req.arg1);
 		req.arg2 = be64toh (req.arg2);
 
+		res.id = htobe64 (req.id);
 		// If the request modifies a task state, find that task here
 		if (req.cmd & REQUEST_MODIFIES_TASK)
 		{
@@ -1821,20 +1831,32 @@ comms_request_servicer (gpointer data)
 			break;
 		case REQUEST_CMD_SET_PROC_EVENT_LIMIT:
 			// arg1: pid, arg2: numerical limit
+			if (task->trigger_event_limit_active)
+			{
+				nvmi_warn ("Task pid=%d already at triggered state", req.arg1);
+				res.status = htobe32(EAGAIN);
+				goto issue_response;
+			}
 			nvmi_warn ("Received request %lx to set event limit to %d for pid=%ld",
 				   req.id, req.arg2, req.arg1);
 			task->trigger_event_limit_active = true;
 			task->trigger_event_limit = req.arg2;
+			triggered = true;
 
-			res.id = htobe64 (req.id);
 			res.status = htobe32 (0);
 			break;
 		case REQUEST_CMD_SET_PROC_TRIGGERED_TIMEOUT:
 		{
 			struct timeval time = {0};
 			unsigned long ms = req.arg2;
-			
+
 			// arg1: pid, arg2: timeout in milliseconds
+			if (task->trigger_timeout_active)
+			{
+				nvmi_warn ("Task pid=%d already at triggered state", req.arg1);
+				res.status = htobe32(EAGAIN);
+				goto issue_response;
+			}
 			gettimeofday (&time, NULL);
 			nvmi_warn ("Received request %lx to set trigger timeout in pid=%ld %ld MS from now, curr time = %ld.%ld",
 				   req.id, req.arg1, req.arg2, time.tv_sec, time.tv_usec);
@@ -1851,7 +1873,7 @@ comms_request_servicer (gpointer data)
 			time.tv_usec = ms * 1000;
 			task->trigger_timeout_active = true;
 			task->trigger_timeout = time;
-
+			triggered = true;
 			nvmi_warn ("Request %lx: trigger timeout in pid=%ld set to %ld.%ld",
 				   req.id, req.arg1, time.tv_sec, time.tv_usec);
 
@@ -1861,6 +1883,22 @@ comms_request_servicer (gpointer data)
 		}
 		default:
 			break;
+		}
+
+		if (triggered)
+		{
+			assert (task);
+			nif_set_level (NVMI_MONITOR_LEVEL_ACTIVE);
+			gstate.level = NVMI_MONITOR_LEVEL_ACTIVE;
+			// Each task can only account for one global
+			if (!task->triggered)
+			{
+				task->triggered = true;
+				//atomic_inc (&task->triggered_ct);
+				atomic_inc (&gstate.triggered_procs);
+			}
+
+
 		}
 
 	issue_response:

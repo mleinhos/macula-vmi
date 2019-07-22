@@ -552,7 +552,7 @@ nif_is_monitored(addr_t kva, bool * monitored)
 	if (VMI_SUCCESS != status)
 	{
 		rc = EINVAL;
-		nvmi_error ("Failed to find PA for kernel VA=%" PRIx64 "", kva);
+		nvmi_debug ("Failed to find PA for kernel VA=%" PRIx64 "", kva);
 		goto exit;
 	}
 
@@ -705,7 +705,8 @@ nif_enable_monitor (addr_t kva,
 		if (NULL != hook_node)
 		{
 			rc = 0;
-			nvmi_warn ("Found hook already in place for va %" PRIx64 "", kva);
+			nvmi_warn ("Found hook already in place for point=%s va=%" PRIx64 "",
+				   name, kva);
 			goto exit;
 		}
 	}
@@ -732,13 +733,13 @@ nif_enable_monitor (addr_t kva,
 	}
 
 #if defined(X86_64)
-	// On Intel, trigger a #VE on unapproved access to the shadow frame
+	// On Intel, trigger a #VE on unapproved access to the frame from active view
 	if (!pgnode->ve_cb_active)
 	{
 		status = vmi_set_mem_event (gnif.vmi, orig_frame, VMI_MEMACCESS_RW, gnif.active_view);
 		if (VMI_FAILURE == status)
 		{
-			nvmi_error ("Shadow: Unable to protect from RW access");
+			nvmi_error ("Active: Unable to protect frame from RW access");
 			goto exit;
 		}
 		pgnode->ve_cb_active = true;
@@ -760,13 +761,13 @@ nif_enable_monitor (addr_t kva,
 			goto exit;
 		}
 #if defined(X86_64)
-		// On Intel, trigger a #VE on unapproved access to the shadow frame
+		// On Intel, trigger a #VE on unapproved access to the frame from trigger view
 		if (!pgnode->ve_cb_trigger)
 		{
 			status =  vmi_set_mem_event (gnif.vmi, orig_frame, VMI_MEMACCESS_RW, gnif.trigger_view);
 			if (VMI_FAILURE == status)
 			{
-				nvmi_error ("Shadow: Unable to protect from RW access");
+				nvmi_error ("Trigger view: Unable to protect frame from RW access");
 				goto exit;
 			}
 			pgnode->ve_cb_trigger = true;			
