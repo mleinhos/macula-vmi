@@ -714,11 +714,11 @@ cb_pre_instr_kill_process (vmi_instance_t vmi, nvmi_event_t * evt, vmi_event_t* 
 		// It is feasible to kill the process. Do it
 		// intermittenly to avoid loop between us and
 		// the process or OS.
-		if (++evt->task->kill_attempts % 3 != 0)
+		if (rand() % 3 != 0)
 		{
 			continue;
 		}
-
+		++evt->task->kill_attempts;
 #define NVMI_BOGUS_REG_VAL 0xbadc0ffee
 		status = vmi_set_vcpureg (vmi, NVMI_BOGUS_REG_VAL, nvmi_syscall_arg_regs[i], vmi_event->vcpu_id);
 		if (VMI_FAILURE == status)
@@ -1821,7 +1821,7 @@ comms_request_servicer (gpointer data)
 
 		// Most requests get an immediate response
 		response_created = true;
-			
+
 		switch (req.cmd)
 		{
 		case REQUEST_CMD_PROCKILL:
@@ -1861,8 +1861,8 @@ comms_request_servicer (gpointer data)
 			nvmi_warn ("Received request %lx to set trigger timeout in pid=%ld %ld MS from now, curr time = %ld.%ld",
 				   req.id, req.arg1, req.arg2, time.tv_sec, time.tv_usec);
 
-			// Timeout: now + specified milliseconds. Add a MS back in due to precision loss.
-			ms += time.tv_usec / 1000 + 1;
+			// Timeout: now + specified milliseconds. Add a fudge factor due to precision loss.
+			ms += time.tv_usec / 1000 + 2;
 
 			// Handle overflow
 			if (ms > 1000)

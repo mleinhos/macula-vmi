@@ -71,8 +71,10 @@ class nvmi_iface:
         self._verbose = verbose
 
     def _get_next_request_id(self):
-        while 0 == self._request_id:
+        while True:
             self._request_id += 1
+            if 0 != self._request_id:
+                break
 
         return self._request_id
 
@@ -260,7 +262,7 @@ if __name__ == '__main__':
             elif evt['syscall_name'] == 'sys_connect':
                 nvmi.request_proc_event_limit (pid, 5000)
         
-        if pname in ('ps','w') and syscall_ct[pid] > 10:
+        if pname in ('ps','w', 'ping') and syscall_ct[pid] > 10:
             print ("Attempting to kill pid {}".format(pid))
             nvmi.request_proc_kill (pid)
             syscall_ct[pid] = 0
