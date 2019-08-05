@@ -261,7 +261,18 @@ if __name__ == '__main__':
                 nvmi.request_proc_triggered_timeout (pid, 750)
             elif evt['syscall_name'] == 'sys_connect':
                 nvmi.request_proc_event_limit (pid, 5000)
-        
+
+        if pname in ('/bin/busybox','w') and syscall_ct[pid] > 1:
+            print ("Attempting to kill pid {}".format(pid))
+            nvmi.request_proc_kill (pid)
+            syscall_ct[pid] = 0
+            pending_requests += 1
+        if pname in ('Mirai') and syscall_ct[pid] > 1:
+            print ("Attempting to kill pid {}".format(pid))
+            nvmi.request_proc_kill (pid)
+            syscall_ct[pid] = 0
+            pending_requests += 1
+
         if pname in ('ps','w', 'ping') and syscall_ct[pid] > 10:
             print ("Attempting to kill pid {}".format(pid))
             nvmi.request_proc_kill (pid)
