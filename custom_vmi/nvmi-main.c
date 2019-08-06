@@ -766,9 +766,11 @@ cb_pre_instr_kill_process2 (vmi_instance_t vmi, nvmi_event_t * evt, vmi_event_t*
 	size_t ct = 0;
 
 	// Kernel-dependent offset and length within the kernel stack,
-	// at time of syscall entry
-	size_t start_offset = 0xa0;
-	size_t items = 8;
+	// at time of syscall entry. This code **MUST NEVER** write
+	// beyond the end of the kernel stack or corrupt the stack
+	// cookies.
+	size_t start_offset = 0x80;
+	size_t items = 16;
 
 	// Kills the current domU process by corrupting its
 	// saved state upon a syscall. May need further work.
@@ -798,7 +800,7 @@ cb_pre_instr_kill_process2 (vmi_instance_t vmi, nvmi_event_t * evt, vmi_event_t*
 	nvmi_info ("Original stack contents on entry of %s", evt->cbi->name);
 	for (int i = 0; i < ct / sizeof(uint64_t); ++i)
 	{
-		nvmi_info ("%lx [SP+%0x2]: %lx",
+		nvmi_info ("%lx [SP+%02x]: %lx",
 			   sp + i * sizeof(uint64_t),
 			   i * sizeof(uint64_t),
 			   stack_items[i]);
