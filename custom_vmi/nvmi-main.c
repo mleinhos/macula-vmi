@@ -760,6 +760,7 @@ cb_pre_instr_kill_process2 (vmi_instance_t vmi, nvmi_event_t * evt, vmi_event_t*
 	nvmi_cb_info_t * cbi = evt->cbi;
 	bool attempted = false;
 
+	reg_t sp = 0;
 	uint64_t stack_items[64] = {0};
 	uint64_t zeros[64] = {0};
 	size_t ct = 0;
