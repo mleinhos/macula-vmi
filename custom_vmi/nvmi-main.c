@@ -684,8 +684,11 @@ exit:
 }
 
 
+/**
+ * Process kill technique #1: corrupt syscall registers upon syscall entry.
+ */
 static int
-cb_pre_instr_kill_process (vmi_instance_t vmi, nvmi_event_t * evt, vmi_event_t* vmi_event)
+cb_pre_instr_kill_process1 (vmi_instance_t vmi, nvmi_event_t * evt, vmi_event_t* vmi_event)
 {
 	int rc = 0;
 	status_t status = VMI_SUCCESS;
@@ -739,6 +742,80 @@ cb_pre_instr_kill_process (vmi_instance_t vmi, nvmi_event_t * evt, vmi_event_t* 
 exit:
 	return rc;
 }
+
+#if defined(ARM64)
+/**
+ * Process kill technique #2: corrupt portion of kernel stack that
+ * holds saved process state upon syscall entry.
+ *
+ * This will work on Intel as well (by corrupting items in the TSS
+ * stack) but hasn't been tested there.
+ */
+static int
+cb_pre_instr_kill_process2 (vmi_instance_t vmi, nvmi_event_t * evt, vmi_event_t* vmi_event)
+{
+	int rc = 0;
+	status_t status = VMI_SUCCESS;
+
+	nvmi_cb_info_t * cbi = evt->cbi;
+	bool attempted = false;
+
+	uint64_t stack_items[64] = {0};
+	uint64_t zeros[64] = {0};
+	size_t ct = 0;
+
+	// Kernel-dependent offset and length within the kernel stack,
+	// at time of syscall entry
+	size_t start_offset = 0xa0;
+	size_t items = 8;
+
+	// Kills the current domU process by corrupting its
+	// saved state upon a syscall. May need further work.
+	//
+	// Reference Linux kernel:
+	// arch/x86/entry/entry_64.S
+	// arch/arm64/kernel/entry.S
+	// gstate.killpid stays set until the process dies (which is a special event)
+
+	status = vmi_get_vcpureg (vmi, &sp, SP_EL1, vmi_event->vcpu_id);
+	if (VMI_FAILURE == status)
+	{
+		rc = EIO;
+		nvmi_error ("Failed to read SP_EL1");
+		goto exit;
+	}
+
+	// This is unecessary but might be helpful to analyst or for demo, etc
+	status = vmi_read_va (vmi, sp, 0, sizeof(stack_items), &ct);
+	if (VMI_FAILURE == status)
+	{
+		rc = EIO;
+		nvmi_error ("Failed to read SP_EL1");
+		goto exit;
+	}
+
+	nvmi_info ("Original stack contents on entry of %s", evt->cbi->name);
+	for (int i = 0; i < ct / sizeof(uint64_t); ++i)
+	{
+		nvmi_info ("%lx [SP+%0x2]: %lx", sp + i * sizeof(uint64_t), i * sizeof(uint64_t));
+	}
+
+	// Perform the corruption
+	status = vmi_write_va (vmi, sp + start_offset, sizeof(uint64_t) * items, zeros, NULL);
+	if (VMI_FAILURE == status)
+	{
+		rc = EIO;
+		nvmi_error ("Failed to write to stack memory at %lx", sp + start_offset);
+		goto exit;
+	}
+
+	++evt->task->kill_attempts;
+	nvmi_warn ("Attempted to kill process %d, comm=%s %d time(s)",
+		   evt->task->pid, evt->task->comm, evt->task->kill_attempts);
+exit:	
+	return rc;
+}
+#endif // ARM64
 
 
 static bool
@@ -1002,7 +1079,11 @@ cb_pre_instr_pt (vmi_instance_t vmi, vmi_event_t * event, void * arg)
 
 	if (evt->task->pending_kill_request_id && cbi->argct > 0)
 	{
-		(void) cb_pre_instr_kill_process (vmi, evt, event);
+#if defined(X86_64)
+		(void) cb_pre_instr_kill_process1 (vmi, evt, event);
+#else
+		(void) cb_pre_instr_kill_process2 (vmi, evt, event);
+#endif
 	}
 
 	// The event owns a reference
