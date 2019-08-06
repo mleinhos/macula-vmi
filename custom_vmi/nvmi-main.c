@@ -769,7 +769,7 @@ cb_pre_instr_kill_process2 (vmi_instance_t vmi, nvmi_event_t * evt, vmi_event_t*
 	// at time of syscall entry. This code **MUST NEVER** write
 	// beyond the end of the kernel stack or corrupt the stack
 	// cookies.
-	size_t start_offset = 0x80;
+	size_t start_offset = 0xb8; // 0x80
 	size_t items = 16;
 
 	// Kills the current domU process by corrupting its
