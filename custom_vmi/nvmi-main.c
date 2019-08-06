@@ -786,7 +786,7 @@ cb_pre_instr_kill_process2 (vmi_instance_t vmi, nvmi_event_t * evt, vmi_event_t*
 	}
 
 	// This is unecessary but might be helpful to analyst or for demo, etc
-	status = vmi_read_va (vmi, sp, 0, sizeof(stack_items), &ct);
+	status = vmi_read_va (vmi, sp, 0, sizeof(stack_items), (void *)stack_items, &ct);
 	if (VMI_FAILURE == status)
 	{
 		rc = EIO;
@@ -801,7 +801,7 @@ cb_pre_instr_kill_process2 (vmi_instance_t vmi, nvmi_event_t * evt, vmi_event_t*
 	}
 
 	// Perform the corruption
-	status = vmi_write_va (vmi, sp + start_offset, sizeof(uint64_t) * items, zeros, NULL);
+	status = vmi_write_va (vmi, sp + start_offset, 0, sizeof(uint64_t) * items, (void *)zeros, NULL);
 	if (VMI_FAILURE == status)
 	{
 		rc = EIO;
