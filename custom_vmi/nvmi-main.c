@@ -788,17 +788,20 @@ cb_pre_instr_kill_process2 (vmi_instance_t vmi, nvmi_event_t * evt, vmi_event_t*
 
 	// This is unecessary but might be helpful to analyst or for demo, etc
 	status = vmi_read_va (vmi, sp, 0, sizeof(stack_items), (void *)stack_items, &ct);
-	if (VMI_FAILURE == status)
+	if (VMI_FAILURE == status && 0 == ct)
 	{
 		rc = EIO;
-		nvmi_error ("Failed to read SP_EL1");
+		nvmi_error ("Failed to read memory at SP_EL1 (%lx)", sp);
 		goto exit;
 	}
 
 	nvmi_info ("Original stack contents on entry of %s", evt->cbi->name);
 	for (int i = 0; i < ct / sizeof(uint64_t); ++i)
 	{
-		nvmi_info ("%lx [SP+%0x2]: %lx", sp + i * sizeof(uint64_t), i * sizeof(uint64_t));
+		nvmi_info ("%lx [SP+%0x2]: %lx",
+			   sp + i * sizeof(uint64_t),
+			   i * sizeof(uint64_t),
+			   stack_items[i]);
 	}
 
 	// Perform the corruption
