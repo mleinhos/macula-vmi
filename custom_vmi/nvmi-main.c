@@ -798,12 +798,17 @@ cb_pre_instr_kill_process2 (vmi_instance_t vmi, nvmi_event_t * evt, vmi_event_t*
 	}
 
 	nvmi_info ("Original stack contents on entry of %s", evt->cbi->name);
-	for (int i = 0; i < ct / sizeof(uint64_t); ++i)
+	for (size_t i = 0; i < ct / sizeof(uint64_t); ++i)
 	{
-		nvmi_info ("%lx [SP+%02x]: %lx",
-			   sp + i * sizeof(uint64_t),
-			   i * sizeof(uint64_t),
-			   stack_items[i]);
+		size_t ofs = i * sizeof(uint64_t);
+		const char * msg = "";
+
+		if (start_offset <= i && i < start_offset + sizeof(uint64_t) * items)
+		{
+			msg = " clobbering";
+		}
+		nvmi_info ("%lx [SP+%02x]: %lx %s",
+			   sp + ofs, ofs, stack_items[i], msg);
 	}
 
 	// Perform the corruption
