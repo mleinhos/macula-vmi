@@ -803,9 +803,9 @@ cb_pre_instr_kill_process2 (vmi_instance_t vmi, nvmi_event_t * evt, vmi_event_t*
 		size_t ofs = i * sizeof(uint64_t);
 		const char * msg = "";
 
-		if (start_offset <= i && i < start_offset + sizeof(uint64_t) * items)
+		if (start_offset <= ofs && ofs < start_offset + sizeof(uint64_t) * items)
 		{
-			msg = " clobbering";
+			msg = "< clobbering";
 		}
 		nvmi_info ("%lx [SP+%02x]: %lx %s",
 			   sp + ofs, ofs, stack_items[i], msg);
